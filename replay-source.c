@@ -2738,9 +2738,12 @@ static void replay_source_tick(void *data, float seconds)
 			obs_source_output_video(context->source, NULL);
 		}
 		if (context->stepped) {
+			struct obs_source_frame *frame;
+			uint64_t t;
+
 			context->stepped = false;
-			struct obs_source_frame *frame = context->current_replay.video_frames[context->video_frame_position];
-			uint64_t t = frame->timestamp;
+			frame = context->current_replay.video_frames[context->video_frame_position];
+			t = frame->timestamp;
 			frame->timestamp = os_timestamp;
 			obs_source_output_video(context->source, frame);
 			frame->timestamp = t;
@@ -2756,11 +2759,17 @@ static void replay_source_tick(void *data, float seconds)
 	replay_update_text(context);
 
 	if (context->current_replay.video_frame_count) {
+		struct obs_source_frame *frame;
+
 		if (context->video_frame_position >= context->current_replay.video_frame_count) {
 			context->video_frame_position = context->current_replay.video_frame_count - 1;
 		}
-		struct obs_source_frame *frame = context->current_replay.video_frames[context->video_frame_position];
+		frame = context->current_replay.video_frames[context->video_frame_position];
 		if (context->backward) {
+			struct obs_source_frame *output_frame;
+			int64_t video_duration;
+			int64_t source_duration;
+
 			if (context->restart) {
 				frame = replay_restart_at_end(context, os_timestamp);
 				if (!frame) {
@@ -2769,12 +2778,12 @@ static void replay_source_tick(void *data, float seconds)
 				}
 			}
 
-			const int64_t video_duration = (int64_t)os_timestamp - (int64_t)context->start_timestamp;
+			video_duration = (int64_t)os_timestamp - (int64_t)context->start_timestamp;
 			//TODO audio backwards
-			int64_t source_duration = (int64_t)((context->current_replay.last_frame_timestamp - frame->timestamp) *
-							    100.0 / context->speed_percent);
+			source_duration = (int64_t)((context->current_replay.last_frame_timestamp - frame->timestamp) *
+						    100.0 / context->speed_percent);
 
-			struct obs_source_frame *output_frame = frame;
+			output_frame = frame;
 			while (context->play && video_duration >= source_duration) {
 				output_frame = frame;
 				if (frame->timestamp <=

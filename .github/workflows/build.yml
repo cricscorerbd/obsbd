@@ -166,7 +166,7 @@ jobs:
       - name: 'Build'
         shell: bash
         run: |
-          cmake --build "./build"
+          cmake --build "./build" --verbose
       - name: 'Package'
         shell: bash
         run: |
@@ -238,6 +238,14 @@ jobs:
           cmake -S . -B "${{ github.workspace }}/build" -G"${{ env.CMAKE_GENERATOR }}" -DCMAKE_PREFIX_PATH:PATH="${{ github.workspace }}/cmbuild/deps" -A"${{ matrix.cmake_build }}" -DCMAKE_SYSTEM_VERSION="${{ env.CMAKE_SYSTEM_VERSION }}" -DBUILD_BROWSER=false -DBUILD_VST=false -DBUILD_VIRTUALCAM=false -DBUILD_CAPTIONS=false -DCOMPILE_D3D12_HOOK=false -DENABLE_SCRIPTING=false -DDepsPath="${{ github.workspace }}/cmbuild/deps" -DDepsPath${{ matrix.deps_ext }}="${{ github.workspace }}/cmbuild/deps" -DQTDIR="${{ github.workspace }}/cmbuild/deps/qt6" -DCOPIED_DEPENDENCIES=FALSE -DCOPY_DEPENDENCIES=TRUE -DENABLE_PLUGINS=TRUE -DDISABLE_PLUGINS=FALSE -DENABLE_BROWSER=FALSE -DENABLE_WEBSOCKET=FALSE
       - name: 'Build'
         run: msbuild /m /p:Configuration=RelWithDebInfo .\build\obs-studio.sln
+      - name: 'Show Build Errors on Failure'
+        if: failure()
+        shell: powershell
+        run: |
+          Get-ChildItem -Path .\build -Filter *.log -Recurse | ForEach-Object {
+            Write-Host "=== $($_.FullName) ==="
+            Get-Content $_.FullName | Select-String -Pattern "error " -Context 2,2
+          }
       - name: Package
         if: success()
         run: |
