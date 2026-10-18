@@ -170,7 +170,10 @@ struct replay_source {
 };
 
 void update_speed(struct replay_source *context, float new_speed);
+static void speed_popup_show(struct replay_source *context);
+static void speed_popup_hide(struct replay_source *context);
 static void speed_popup_notify_speed(struct replay_source *context);
+static void speed_popup_destroy(struct replay_source *context);
 
 static void replace_text(struct dstr *str, size_t pos, size_t len, const char *new_text)
 {
