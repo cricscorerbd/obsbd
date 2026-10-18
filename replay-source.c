@@ -10,6 +10,17 @@
 #include "replay.h"
 #include <inttypes.h>
 #include <string.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <commctrl.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#endif
+#endif
 
 #define VISIBILITY_ACTION_RESTART 0
 #define VISIBILITY_ACTION_PAUSE 1
@@ -651,13 +662,6 @@ static void replay_source_defaults(obs_data_t *settings)
 }
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <commctrl.h>
-#include <stdio.h>
-
 #define ID_POPUP_SLIDER 2001
 #define ID_POPUP_BTN_MINUS 2002
 #define ID_POPUP_BTN_PLUS 2003
@@ -943,17 +947,26 @@ static void speed_popup_create(struct replay_source *context)
 	popup->context = context;
 	context->speed_popup = popup;
 	popup->thread = CreateThread(NULL, 0, SpeedPopupThread, popup, 0, &popup->thread_id);
-	Sleep(100);
+	os_sleep_ms(20);
 }
 
 static void speed_popup_show(struct replay_source *context)
 {
 	struct speed_popup *popup;
+	int retries = 0;
 	if (!context->speed_popup)
 		speed_popup_create(context);
 
 	popup = (struct speed_popup *)context->speed_popup;
-	if (popup && popup->hwnd) {
+	if (!popup)
+		return;
+
+	while (!popup->hwnd && retries < 20) {
+		os_sleep_ms(10);
+		retries++;
+	}
+
+	if (popup->hwnd) {
 		PostMessageA(popup->hwnd, WM_USER_SHOW_POPUP, 0, 0);
 	}
 }
