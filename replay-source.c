@@ -505,6 +505,13 @@ static void replay_update_position(struct replay_source *context, bool lock)
 	       sizeof context->current_replay);
 	context->video_frame_position = 0;
 	context->audio_frame_position = 0;
+	context->speed_percent = 60.0f;
+	obs_data_t *settings = obs_source_get_settings(context->source);
+	if (settings) {
+		obs_data_set_double(settings, SETTING_SPEED, 60.0);
+		obs_data_release(settings);
+	}
+	replay_update_text(context);
 	context->start_timestamp = obs_get_video_frame_time();
 	context->backward = context->backward_start;
 	if (!context->backward && context->current_replay.trim_front != 0) {
@@ -612,7 +619,7 @@ static void replay_source_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, SETTING_DURATION, 5000);
 	obs_data_set_default_int(settings, SETTING_REPLAYS, 1);
-	obs_data_set_default_int(settings, SETTING_SPEED, 100);
+	obs_data_set_default_int(settings, SETTING_SPEED, 60);
 	obs_data_set_default_int(settings, SETTING_VISIBILITY_ACTION, VISIBILITY_ACTION_CONTINUE);
 	obs_data_set_default_int(settings, SETTING_START_DELAY, 0);
 	obs_data_set_default_int(settings, SETTING_FRAME_STEP_COUNT, 5);
@@ -1177,6 +1184,14 @@ static void replay_retrieve(struct replay_source *context)
 	circlebuf_push_back(&context->replays, &new_replay, sizeof new_replay);
 	pthread_mutex_unlock(&context->replay_mutex);
 
+	context->speed_percent = 60.0f;
+	obs_data_t *settings_ret = obs_source_get_settings(context->source);
+	if (settings_ret) {
+		obs_data_set_double(settings_ret, SETTING_SPEED, 60.0);
+		obs_data_release(settings_ret);
+	}
+	replay_update_text(context);
+
 	blog(LOG_INFO, "[replay_source: '%s'] replay added of %.2f seconds", obs_source_get_name(context->source),
 	     (double)new_replay.duration / (double)1000000000.0);
 
@@ -1368,6 +1383,13 @@ static void replay_next_scene_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t 
 static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c, const uint64_t os_timestamp)
 {
 	c->video_frame_position = 0;
+	c->speed_percent = 60.0f;
+	obs_data_t *settings = obs_source_get_settings(c->source);
+	if (settings) {
+		obs_data_set_double(settings, SETTING_SPEED, 60.0);
+		obs_data_release(settings);
+	}
+	replay_update_text(c);
 	c->restart = false;
 	c->start_timestamp = os_timestamp;
 	c->pause_timestamp = c->play ? 0 : os_timestamp;
@@ -1399,6 +1421,13 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 static struct obs_source_frame *replay_restart_at_end(struct replay_source *c, const uint64_t os_timestamp)
 {
 	c->video_frame_position = c->current_replay.video_frame_count - 1;
+	c->speed_percent = 60.0f;
+	obs_data_t *settings = obs_source_get_settings(c->source);
+	if (settings) {
+		obs_data_set_double(settings, SETTING_SPEED, 60.0);
+		obs_data_release(settings);
+	}
+	replay_update_text(c);
 	struct obs_source_frame *frame = c->current_replay.video_frames[c->video_frame_position];
 	const int64_t duration =
 		(int64_t)(((int64_t)c->current_replay.last_frame_timestamp - (int64_t)c->current_replay.first_frame_timestamp) *
@@ -2099,7 +2128,7 @@ static void replay_source_update(void *data, obs_data_t *settings)
 
 	float new_speed = (float)obs_data_get_double(settings, SETTING_SPEED);
 	if (new_speed < SETTING_SPEED_MIN || new_speed > SETTING_SPEED_MAX)
-		new_speed = 100.0f;
+		new_speed = 60.0f;
 	update_speed(context, new_speed);
 
 	context->backward_start = obs_data_get_bool(settings, SETTING_BACKWARD);
