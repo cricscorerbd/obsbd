@@ -10,11 +10,15 @@ on:
 env:
   PLUGIN_NAME: replay-source
   OBS_VERSION: 29.1.0
+  FILE_NAME: ''
+  FILE_NAME_X86: ''
+  FILE_NAME_X64: ''
 
 jobs:
   macos:
     name: macOS
     runs-on: macos-latest
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
