@@ -224,10 +224,10 @@ static void replay_update_text(struct replay_source *c)
 		} else if (astrcmp_n(cmp, "%TIME%", 6) == 0) {
 			if (c->replays.size && c->start_timestamp) {
 				int64_t time = 0;
-				if (c->pause_timestamp > c->start_timestamp) {
-					time = c->pause_timestamp - c->start_timestamp;
+				if ((int64_t)c->pause_timestamp > c->start_timestamp) {
+					time = (int64_t)c->pause_timestamp - c->start_timestamp;
 				} else {
-					time = obs_get_video_frame_time() - c->start_timestamp;
+					time = (int64_t)obs_get_video_frame_time() - c->start_timestamp;
 				}
 				if (c->speed_percent != 100.0f) {
 					time = (int64_t)((float)time * c->speed_percent / 100.0f);
@@ -1935,8 +1935,8 @@ static void replay_trim_end_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *h
 		return;
 
 	const uint64_t timestamp = c->pause_timestamp == 0 ? obs_get_video_frame_time() : c->pause_timestamp;
-	if (timestamp > c->start_timestamp) {
-		int64_t duration = timestamp - c->start_timestamp;
+	if ((int64_t)timestamp > c->start_timestamp) {
+		int64_t duration = (int64_t)timestamp - c->start_timestamp;
 		if (c->speed_percent != 100.0f) {
 			duration = (int64_t)(duration * c->speed_percent / 100.0);
 		}
@@ -3225,10 +3225,10 @@ int64_t replay_get_time(void *data)
 	struct replay_source *c = data;
 	if (c->replays.size && c->start_timestamp) {
 		uint64_t time = 0;
-		if (c->pause_timestamp > c->start_timestamp) {
-			time = c->pause_timestamp - c->start_timestamp;
+		if ((int64_t)c->pause_timestamp > c->start_timestamp) {
+			time = (uint64_t)((int64_t)c->pause_timestamp - c->start_timestamp);
 		} else {
-			time = obs_get_video_frame_time() - c->start_timestamp;
+			time = (uint64_t)((int64_t)obs_get_video_frame_time() - c->start_timestamp);
 		}
 		return time / 1000000UL;
 	}
@@ -3239,10 +3239,10 @@ void replay_set_time(void *data, int64_t seconds)
 {
 	struct replay_source *c = data;
 
-	if (c->pause_timestamp > c->start_timestamp) {
-		c->start_timestamp = c->pause_timestamp - seconds * 1000000UL;
+	if ((int64_t)c->pause_timestamp > c->start_timestamp) {
+		c->start_timestamp = (int64_t)c->pause_timestamp - seconds * 1000000UL;
 	} else {
-		c->start_timestamp = obs_get_video_frame_time() - seconds * 1000000UL;
+		c->start_timestamp = (int64_t)obs_get_video_frame_time() - seconds * 1000000UL;
 	}
 }
 

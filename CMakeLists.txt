@@ -60,6 +60,12 @@ target_link_libraries(${PROJECT_NAME}
 	OBS::${OBS_FRONTEND_API_NAME}
 	OBS::libobs)
 
+if(MSVC)
+	target_compile_options(${PROJECT_NAME} PRIVATE /WX- /wd4018)
+else()
+	target_compile_options(${PROJECT_NAME} PRIVATE -Wno-error)
+endif()
+
 if(BUILD_OUT_OF_TREE)
     if(NOT LIB_OUT_DIR)
         set(LIB_OUT_DIR "/lib/obs-plugins")
