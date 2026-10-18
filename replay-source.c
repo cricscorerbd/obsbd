@@ -97,7 +97,7 @@ struct replay_source {
 	obs_hotkey_id prev_frame_hotkey;
 	obs_hotkey_id next_n_frames_hotkey;
 	obs_hotkey_id prev_n_frames_hotkey;
-	uint64_t start_timestamp;
+	int64_t start_timestamp;
 	uint64_t previous_frame_timestamp;
 	uint64_t pause_timestamp;
 	int64_t start_delay;
@@ -1655,13 +1655,9 @@ void update_speed(struct replay_source *context, float new_speed)
 			if (context->backward) {
 				duration = context->current_replay.last_frame_timestamp - peek_frame->timestamp;
 			}
-			const uint64_t now = context->pause_timestamp != 0 ? context->pause_timestamp : obs_get_video_frame_time();
-			const uint64_t new_duration = (uint64_t)((double)duration * 100.0 / new_speed);
-			if (now > new_duration) {
-				context->start_timestamp = now - new_duration;
-			} else {
-				context->start_timestamp = 0;
-			}
+			const int64_t now = context->pause_timestamp != 0 ? (int64_t)context->pause_timestamp : (int64_t)obs_get_video_frame_time();
+			const int64_t new_duration = (int64_t)((double)duration * 100.0 / new_speed);
+			context->start_timestamp = now - new_duration;
 		}
 	} else if (context->current_replay.audio_frame_count) {
 		uint64_t pos = context->audio_frame_position;
@@ -1669,13 +1665,9 @@ void update_speed(struct replay_source *context, float new_speed)
 			pos = context->current_replay.audio_frame_count - 1;
 		struct obs_audio_data *peek_audio = &context->current_replay.audio_frames[pos];
 		uint64_t duration = peek_audio->timestamp - context->current_replay.first_frame_timestamp;
-		const uint64_t now = context->pause_timestamp != 0 ? context->pause_timestamp : obs_get_video_frame_time();
-		const uint64_t new_duration = (uint64_t)((double)duration * 100.0 / new_speed);
-		if (now > new_duration) {
-			context->start_timestamp = now - new_duration;
-		} else {
-			context->start_timestamp = 0;
-		}
+		const int64_t now = context->pause_timestamp != 0 ? (int64_t)context->pause_timestamp : (int64_t)obs_get_video_frame_time();
+		const int64_t new_duration = (int64_t)((double)duration * 100.0 / new_speed);
+		context->start_timestamp = now - new_duration;
 	}
 	context->speed_percent = new_speed;
 	pthread_mutex_unlock(&context->video_mutex);
@@ -2770,7 +2762,7 @@ static void replay_source_tick(void *data, float seconds)
 					return;
 				}
 			}
-			if (context->start_timestamp > os_timestamp) {
+			if ((int64_t)context->start_timestamp > (int64_t)os_timestamp) {
 				pthread_mutex_unlock(&context->video_mutex);
 				return;
 			}
@@ -2787,25 +2779,25 @@ static void replay_source_tick(void *data, float seconds)
 				int64_t audio_duration = (int64_t)(((int64_t)peek_audio.timestamp -
 								    (int64_t)context->current_replay.first_frame_timestamp) *
 								   100.0 / context->speed_percent);
+				int audio_packets_output = 0;
 				while (context->play && video_duration + frame_duration > audio_duration) {
 					if (peek_audio.timestamp > context->current_replay.first_frame_timestamp - frame_duration &&
 					    peek_audio.timestamp < context->current_replay.last_frame_timestamp + frame_duration) {
 						context->audio.frames = peek_audio.frames;
 
+						uint32_t sample_rate = context->current_replay.oai.samples_per_sec;
 						if (context->speed_percent != 100.0f) {
 							context->audio.timestamp =
 								(uint64_t)(context->start_timestamp +
 									   (((int64_t)peek_audio.timestamp -
 									     (int64_t)context->current_replay.first_frame_timestamp) *
 									    100.0 / context->speed_percent));
-							context->audio.samples_per_sec =
+							sample_rate =
 								(uint32_t)(context->current_replay.oai.samples_per_sec *
 									   context->speed_percent / 100.0);
 						} else {
 							context->audio.timestamp = peek_audio.timestamp + context->start_timestamp -
 										   context->current_replay.first_frame_timestamp;
-							context->audio.samples_per_sec =
-								context->current_replay.oai.samples_per_sec;
 						}
 						for (size_t i = 0; i < MAX_AV_PLANES; i++) {
 							context->audio.data[i] = peek_audio.data[i];
@@ -2814,7 +2806,11 @@ static void replay_source_tick(void *data, float seconds)
 						context->audio.speakers = context->current_replay.oai.speakers;
 						context->audio.format = context->current_replay.oai.format;
 
-						obs_source_output_audio(context->source, &context->audio);
+						if (sample_rate >= 8000 && sample_rate <= 192000 && audio_packets_output < 5) {
+							context->audio.samples_per_sec = sample_rate;
+							obs_source_output_audio(context->source, &context->audio);
+							audio_packets_output++;
+						}
 					}
 					context->audio_frame_position++;
 					if (context->audio_frame_position >= context->current_replay.audio_frame_count) {
@@ -2890,7 +2886,7 @@ static void replay_source_tick(void *data, float seconds)
 				peek_audio = context->current_replay.audio_frames[context->audio_frame_position];
 			}
 		}
-		if (context->start_timestamp > os_timestamp) {
+		if ((int64_t)context->start_timestamp > (int64_t)os_timestamp) {
 			pthread_mutex_unlock(&context->video_mutex);
 			return;
 		}
