@@ -60,6 +60,10 @@ target_link_libraries(${PROJECT_NAME}
 	OBS::${OBS_FRONTEND_API_NAME}
 	OBS::libobs)
 
+if(OS_WINDOWS)
+	target_link_libraries(${PROJECT_NAME} user32 gdi32 comctl32)
+endif()
+
 if(MSVC)
 	target_compile_options(${PROJECT_NAME} PRIVATE /WX- /wd4018)
 else()
