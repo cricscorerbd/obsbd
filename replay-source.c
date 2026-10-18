@@ -361,6 +361,9 @@ static inline void obs_source_signal(struct obs_source *source, const char *sign
 
 static void replay_reverse(struct replay_source *c, uint64_t os_timestamp)
 {
+	int64_t duration;
+	int64_t play_duration;
+
 	c->backward = !c->backward;
 	if (c->end) {
 		c->end = false;
@@ -370,10 +373,10 @@ static void replay_reverse(struct replay_source *c, uint64_t os_timestamp)
 			c->video_frame_position = 0;
 		}
 	}
-	const int64_t duration =
+	duration =
 		(int64_t)(((int64_t)c->current_replay.last_frame_timestamp - (int64_t)c->current_replay.first_frame_timestamp) *
 			  100.0 / c->speed_percent);
-	int64_t play_duration = os_timestamp - c->start_timestamp;
+	play_duration = os_timestamp - c->start_timestamp;
 	if (play_duration > duration) {
 		play_duration = duration;
 	}
@@ -388,7 +391,7 @@ static void replay_reverse_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *ho
 	struct replay_source *c = data;
 
 	if (pressed) {
-		const int64_t time = obs_get_video_frame_time();
+		int64_t time = obs_get_video_frame_time();
 		if (c->pause_timestamp && !c->stepped) {
 			c->start_timestamp += time - c->pause_timestamp;
 			c->pause_timestamp = 0;
@@ -410,31 +413,36 @@ static void replay_forward_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *ho
 
 	if (!pressed)
 		return;
-	const int64_t time = obs_get_video_frame_time();
-	if (c->pause_timestamp) {
-		c->start_timestamp += time - c->pause_timestamp;
-		c->pause_timestamp = 0;
-	}
-	if (!c->play) {
-		c->play = true;
-		obs_source_signal(c->source, "media_play");
-	}
-	if (c->end) {
-		c->end = false;
-		c->video_frame_position = 0;
-		c->start_timestamp = obs_get_video_frame_time();
-		c->backward = false;
-	} else if (c->backward) {
-		c->backward = false;
-
-		const int64_t duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp -
-						    (int64_t)c->current_replay.first_frame_timestamp) *
-						   100.0 / c->speed_percent);
-		int64_t play_duration = time - c->start_timestamp;
-		if (play_duration > duration) {
-			play_duration = duration;
+	{
+		int64_t time = obs_get_video_frame_time();
+		if (c->pause_timestamp) {
+			c->start_timestamp += time - c->pause_timestamp;
+			c->pause_timestamp = 0;
 		}
-		c->start_timestamp = time - duration + play_duration;
+		if (!c->play) {
+			c->play = true;
+			obs_source_signal(c->source, "media_play");
+		}
+		if (c->end) {
+			c->end = false;
+			c->video_frame_position = 0;
+			c->start_timestamp = obs_get_video_frame_time();
+			c->backward = false;
+		} else if (c->backward) {
+			int64_t duration;
+			int64_t play_duration;
+
+			c->backward = false;
+
+			duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp -
+							    (int64_t)c->current_replay.first_frame_timestamp) *
+							   100.0 / c->speed_percent);
+			play_duration = time - c->start_timestamp;
+			if (play_duration > duration) {
+				play_duration = duration;
+			}
+			c->start_timestamp = time - duration + play_duration;
+		}
 	}
 }
 
@@ -447,32 +455,37 @@ static void replay_backward_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *h
 
 	if (!pressed)
 		return;
-	const int64_t time = obs_get_video_frame_time();
-	if (c->pause_timestamp) {
-		c->start_timestamp += time - c->pause_timestamp;
-		c->pause_timestamp = 0;
-	}
-	if (!c->play) {
-		c->play = true;
-		obs_source_signal(c->source, "media_play");
-	}
-	if (c->end || c->video_frame_position == 0) {
-		c->end = false;
-		if (c->current_replay.video_frame_count)
-			c->video_frame_position = c->current_replay.video_frame_count - 1;
-		c->start_timestamp = obs_get_video_frame_time();
-		c->backward = true;
-	} else if (!c->backward) {
-		c->backward = true;
-
-		const int64_t duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp -
-						    (int64_t)c->current_replay.first_frame_timestamp) *
-						   100.0 / c->speed_percent);
-		int64_t play_duration = time - c->start_timestamp;
-		if (play_duration > duration) {
-			play_duration = duration;
+	{
+		int64_t time = obs_get_video_frame_time();
+		if (c->pause_timestamp) {
+			c->start_timestamp += time - c->pause_timestamp;
+			c->pause_timestamp = 0;
 		}
-		c->start_timestamp = time - duration + play_duration;
+		if (!c->play) {
+			c->play = true;
+			obs_source_signal(c->source, "media_play");
+		}
+		if (c->end || c->video_frame_position == 0) {
+			c->end = false;
+			if (c->current_replay.video_frame_count)
+				c->video_frame_position = c->current_replay.video_frame_count - 1;
+			c->start_timestamp = obs_get_video_frame_time();
+			c->backward = true;
+		} else if (!c->backward) {
+			int64_t duration;
+			int64_t play_duration;
+
+			c->backward = true;
+
+			duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp -
+							    (int64_t)c->current_replay.first_frame_timestamp) *
+							   100.0 / c->speed_percent);
+			play_duration = time - c->start_timestamp;
+			if (play_duration > duration) {
+				play_duration = duration;
+			}
+			c->start_timestamp = time - duration + play_duration;
+		}
 	}
 }
 
@@ -746,7 +759,7 @@ static void replay_play_pause(void *data, bool pause)
 			obs_source_signal(c->source, "media_play");
 		}
 	} else {
-		const int64_t time = obs_get_video_frame_time();
+		int64_t time = obs_get_video_frame_time();
 		if (c->pause_timestamp) {
 			c->start_timestamp += time - c->pause_timestamp;
 			c->pause_timestamp = 0;
@@ -834,19 +847,25 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 	if (!context->start_save_timestamp || start_ts_in < context->start_save_timestamp)
 		return true;
 
-	uint64_t end_timestamp = context->start_save_timestamp + context->saving_replay.last_frame_timestamp -
+	uint64_t end_timestamp;
+	size_t channels;
+	size_t sample_rate;
+	uint64_t i = 0;
+	uint64_t duration_start;
+	uint64_t duration_end;
+
+	end_timestamp = context->start_save_timestamp + context->saving_replay.last_frame_timestamp -
 				 context->saving_replay.first_frame_timestamp;
 	if (start_ts_in > end_timestamp)
 		return true;
 
-	size_t channels = audio_output_get_channels(context->audio_t);
-	size_t sample_rate = audio_output_get_sample_rate(context->audio_t);
+	channels = audio_output_get_channels(context->audio_t);
+	sample_rate = audio_output_get_sample_rate(context->audio_t);
 
 	pthread_mutex_lock(&context->audio_mutex);
 
-	uint64_t i = 0;
-	uint64_t duration_start = start_ts_in - context->start_save_timestamp;
-	uint64_t duration_end = end_ts_in - context->start_save_timestamp;
+	duration_start = start_ts_in - context->start_save_timestamp;
+	duration_end = end_ts_in - context->start_save_timestamp;
 	while (i < context->saving_replay.audio_frame_count &&
 	       context->saving_replay.audio_frames[i].timestamp < context->saving_replay.first_frame_timestamp) {
 		i++;
@@ -934,8 +953,11 @@ void replay_save(struct replay_source *context)
 
 	memcpy(&context->saving_replay, &context->current_replay, sizeof context->current_replay);
 
-	const uint32_t width = context->saving_replay.video_frames[0]->width;
-	const uint32_t height = context->saving_replay.video_frames[0]->height;
+	uint32_t width;
+	uint32_t height;
+
+	width = context->saving_replay.video_frames[0]->width;
+	height = context->saving_replay.video_frames[0]->height;
 	if (context->known_width != width || context->known_height != height) {
 		video_t *t = obs_get_video();
 		const struct video_output_info *ovi = video_output_get_info(t);
@@ -2644,8 +2666,12 @@ static void replay_source_tick(void *data, float seconds)
 			context->saving_status = SAVING_STATUS_STOPPING;
 			obs_output_stop(context->fileOutput);
 		} else {
+			struct obs_source_frame *frame;
+			uint64_t timestamp;
+			struct video_frame output_frame;
+
 			pthread_mutex_lock(&context->video_mutex);
-			struct obs_source_frame *frame = context->saving_replay.video_frames[context->video_save_position];
+			frame = context->saving_replay.video_frames[context->video_save_position];
 			while (frame->timestamp <
 			       context->saving_replay.first_frame_timestamp + context->saving_replay.trim_front) {
 				context->video_save_position++;
@@ -2655,13 +2681,12 @@ static void replay_source_tick(void *data, float seconds)
 				}
 				frame = context->saving_replay.video_frames[context->video_save_position];
 			}
-			uint64_t timestamp = frame->timestamp;
+			timestamp = frame->timestamp;
 			if (context->start_save_timestamp > context->saving_replay.first_frame_timestamp) {
 				timestamp += context->start_save_timestamp - context->saving_replay.first_frame_timestamp;
 			}
 			timestamp -= context->saving_replay.trim_front;
 
-			struct video_frame output_frame;
 			if (video_output_lock_frame(context->video_output, &output_frame, 1, timestamp)) {
 				video_scaler_scale(context->scaler, output_frame.data, output_frame.linesize,
 						   (const uint8_t *const *)frame->data, frame->linesize);
@@ -2698,12 +2723,14 @@ static void replay_source_tick(void *data, float seconds)
 				if (context->video_save_position >= context->saving_replay.video_frame_count) {
 					context->video_save_position = context->saving_replay.video_frame_count - 1;
 				}
-				struct obs_source_frame *frame = context->saving_replay.video_frames[context->video_save_position];
-				struct video_frame output_frame;
-				if (video_output_lock_frame(context->video_output, &output_frame, 1, os_timestamp)) {
-					video_scaler_scale(context->scaler, output_frame.data, output_frame.linesize,
-							   (const uint8_t *const *)frame->data, frame->linesize);
-					video_output_unlock_frame(context->video_output);
+				{
+					struct obs_source_frame *frame = context->saving_replay.video_frames[context->video_save_position];
+					struct video_frame output_frame;
+					if (video_output_lock_frame(context->video_output, &output_frame, 1, os_timestamp)) {
+						video_scaler_scale(context->scaler, output_frame.data, output_frame.linesize,
+								   (const uint8_t *const *)frame->data, frame->linesize);
+						video_output_unlock_frame(context->video_output);
+					}
 				}
 				pthread_mutex_unlock(&context->video_mutex);
 			}
