@@ -2442,7 +2442,6 @@ static inline size_t get_frame_plane_count(enum video_format format)
 	case VIDEO_FORMAT_BGRA:
 	case VIDEO_FORMAT_BGRX:
 	case VIDEO_FORMAT_RGBA:
-	case VIDEO_FORMAT_RGBX:
 	case VIDEO_FORMAT_YUY2:
 	case VIDEO_FORMAT_UYVY:
 	case VIDEO_FORMAT_Y800:
