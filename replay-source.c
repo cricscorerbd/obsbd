@@ -8,19 +8,11 @@
 #include <media-io/video-scaler.h>
 #include <obs-frontend-api.h>
 #include "replay.h"
+#include "replay-source-internal.h"
+#include "speed-popup.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <commctrl.h>
-#ifdef _MSC_VER
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
-#endif
-#endif
 
 #define VISIBILITY_ACTION_RESTART 0
 #define VISIBILITY_ACTION_PAUSE 1
@@ -35,145 +27,6 @@
 #define END_ACTION_PAUSE_ALL 5
 #define END_ACTION_LOOP_ALL 6
 #define END_ACTION_REVERSE_ALL 7
-
-enum saving_status {
-	SAVING_STATUS_NONE = 0,
-	SAVING_STATUS_STARTING = 1,
-	SAVING_STATUS_STARTING2 = 2,
-	SAVING_STATUS_SAVING = 3,
-	SAVING_STATUS_STOPPING = 4
-};
-
-struct replay {
-	struct obs_source_frame **video_frames;
-	uint64_t video_frame_count;
-	struct obs_audio_data *audio_frames;
-	struct audio_convert_info oai;
-	uint64_t audio_frame_count;
-	uint64_t first_frame_timestamp;
-	uint64_t last_frame_timestamp;
-	uint64_t duration;
-	int64_t trim_front;
-	int64_t trim_end;
-};
-
-struct replay_source {
-	obs_source_t *source;
-	obs_source_t *source_filter;
-	obs_source_t *source_audio_filter;
-	char *source_name;
-	char *source_audio_name;
-	float speed_percent;
-	bool backward;
-	bool backward_start;
-	int visibility_action;
-	int end_action;
-	char *next_scene_name;
-	bool next_scene_disabled;
-	char *load_switch_scene_name;
-	obs_hotkey_id replay_hotkey;
-	obs_hotkey_id next_hotkey;
-	obs_hotkey_id previous_hotkey;
-	obs_hotkey_id first_hotkey;
-	obs_hotkey_id last_hotkey;
-	obs_hotkey_id remove_hotkey;
-	obs_hotkey_id clear_hotkey;
-	obs_hotkey_id restart_hotkey;
-	obs_hotkey_id pause_hotkey;
-	obs_hotkey_id faster_hotkey;
-	obs_hotkey_id slower_hotkey;
-	obs_hotkey_id faster_by_5_hotkey;
-	obs_hotkey_id slower_by_5_hotkey;
-	obs_hotkey_id normal_or_faster_hotkey;
-	obs_hotkey_id normal_or_slower_hotkey;
-	obs_hotkey_id normal_speed_hotkey;
-	obs_hotkey_id half_speed_hotkey;
-	obs_hotkey_id double_speed_hotkey;
-	obs_hotkey_id trim_front_hotkey;
-	obs_hotkey_id trim_end_hotkey;
-	obs_hotkey_id trim_reset_hotkey;
-	obs_hotkey_id reverse_hotkey;
-	obs_hotkey_id forward_hotkey;
-	obs_hotkey_id backward_hotkey;
-	obs_hotkey_id forward_or_faster_hotkey;
-	obs_hotkey_id backward_or_faster_hotkey;
-	obs_hotkey_id save_hotkey;
-	obs_hotkey_id enable_hotkey;
-	obs_hotkey_id disable_hotkey;
-	obs_hotkey_id enable_next_scene_hotkey;
-	obs_hotkey_id disable_next_scene_hotkey;
-	obs_hotkey_id next_scene_current_hotkey;
-	obs_hotkey_id next_scene_hotkey;
-	obs_hotkey_id next_frame_hotkey;
-	obs_hotkey_id prev_frame_hotkey;
-	obs_hotkey_id next_n_frames_hotkey;
-	obs_hotkey_id prev_n_frames_hotkey;
-	int64_t start_timestamp;
-	uint64_t previous_frame_timestamp;
-	uint64_t pause_timestamp;
-	int64_t start_delay;
-	int64_t retrieve_delay;
-	int64_t frame_step_count;
-	uint64_t retrieve_timestamp;
-	uint64_t threshold_timestamp;
-	struct obs_source_audio audio;
-
-	bool disabled;
-	bool play;
-	bool restart;
-	bool active;
-	bool end;
-	bool stepped;
-	enum saving_status saving_status;
-
-	int replay_position;
-	int replay_max;
-#if LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 1, 0)
-	struct deque replays;
-#else
-	struct circlebuf replays;
-#endif
-	struct replay current_replay;
-	struct replay saving_replay;
-
-	uint64_t video_frame_position;
-	uint64_t video_save_position;
-
-	/* stores the audio data */
-	uint64_t audio_frame_position;
-	struct obs_audio_data audio_output;
-
-	pthread_mutex_t video_mutex;
-	pthread_mutex_t audio_mutex;
-	pthread_mutex_t replay_mutex;
-
-	uint32_t known_width;
-	uint32_t known_height;
-
-	video_t *video_output;
-	obs_output_t *fileOutput;
-	obs_encoder_t *h264Recording;
-	audio_t *audio_t;
-	video_scaler_t *scaler;
-	bool lossless;
-	char *file_format;
-	char *directory;
-	uint64_t start_save_timestamp;
-	obs_encoder_t *aac;
-	char *progress_source_name;
-	char *text_source_name;
-	char *text_format;
-	bool sound_trigger;
-	bool filter_loaded;
-	bool free_after_save;
-	void *speed_popup;
-};
-
-void update_speed(struct replay_source *context, float new_speed);
-static void speed_popup_show(struct replay_source *context);
-static void speed_popup_hide(struct replay_source *context);
-static void speed_popup_notify_speed(struct replay_source *context);
-static void speed_popup_destroy(struct replay_source *context);
 
 static void replace_text(struct dstr *str, size_t pos, size_t len, const char *new_text)
 {
@@ -461,6 +314,7 @@ static void replay_forward_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *ho
 			}
 			c->start_timestamp = time - duration + play_duration;
 		}
+		speed_popup_notify(c);
 	}
 }
 
@@ -504,7 +358,18 @@ static void replay_backward_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *h
 			}
 			c->start_timestamp = time - duration + play_duration;
 		}
+		speed_popup_notify(c);
 	}
+}
+
+void replay_set_forward(struct replay_source *context)
+{
+	replay_forward_hotkey(context, 0, NULL, true);
+}
+
+void replay_set_backward(struct replay_source *context)
+{
+	replay_backward_hotkey(context, 0, NULL, true);
 }
 
 static void replay_update_position(struct replay_source *context, bool lock)
@@ -663,357 +528,6 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, SETTING_FILE_FORMAT, "%CCYY-%MM-%DD %hh.%mm.%ss");
 	obs_data_set_default_bool(settings, SETTING_LOSSLESS, false);
 }
-
-#ifdef _WIN32
-#define ID_POPUP_SLIDER 2001
-#define ID_POPUP_BTN_MINUS 2002
-#define ID_POPUP_BTN_PLUS 2003
-#define ID_POPUP_BTN_10 2010
-#define ID_POPUP_BTN_25 2025
-#define ID_POPUP_BTN_40 2040
-#define ID_POPUP_BTN_50 2050
-#define ID_POPUP_BTN_60 2060
-#define WM_USER_UPDATE_SPEED (WM_USER + 101)
-#define WM_USER_SHOW_POPUP (WM_USER + 102)
-#define WM_USER_HIDE_POPUP (WM_USER + 103)
-
-struct speed_popup {
-	struct replay_source *context;
-	HWND hwnd;
-	HWND hwnd_slider;
-	HWND hwnd_label;
-	HWND hwnd_minus;
-	HWND hwnd_plus;
-	HWND hwnd_b10;
-	HWND hwnd_b25;
-	HWND hwnd_b40;
-	HWND hwnd_b50;
-	HWND hwnd_b60;
-	HFONT hfont_title;
-	HFONT hfont_btns;
-	HBRUSH hbr_bg;
-	HANDLE thread;
-	DWORD thread_id;
-	bool is_showing;
-};
-
-static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-	struct speed_popup *popup;
-	popup = (struct speed_popup *)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
-
-	switch (msg) {
-	case WM_CREATE: {
-		CREATESTRUCTA *cs;
-		INITCOMMONCONTROLSEX icex;
-		int cur_spd;
-		char buf[64];
-
-		cs = (CREATESTRUCTA *)lParam;
-		popup = (struct speed_popup *)cs->lpCreateParams;
-		SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)popup);
-		popup->hwnd = hwnd;
-
-		popup->hbr_bg = CreateSolidBrush(RGB(24, 26, 32));
-		popup->hfont_title = CreateFontA(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-						 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-						 DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-		popup->hfont_btns = CreateFontA(14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-						DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-						DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-
-		popup->hwnd_label = CreateWindowExA(0, "STATIC", "⚡ Speed: 60%",
-						   WS_CHILD | WS_VISIBLE | SS_LEFT,
-						   18, 12, 310, 28, hwnd, NULL, NULL, NULL);
-		SendMessageA(popup->hwnd_label, WM_SETFONT, (WPARAM)popup->hfont_title, TRUE);
-
-		icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-		icex.dwICC = ICC_BAR_CLASSES;
-		InitCommonControlsEx(&icex);
-
-		popup->hwnd_slider = CreateWindowExA(0, TRACKBAR_CLASSA, "SpeedSlider",
-						    WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_NOTICKS,
-						    14, 46, 316, 34, hwnd, (HMENU)ID_POPUP_SLIDER, NULL, NULL);
-		SendMessageA(popup->hwnd_slider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG((int)SETTING_SPEED_MIN, (int)SETTING_SPEED_MAX));
-		cur_spd = (int)popup->context->speed_percent;
-		if (cur_spd < (int)SETTING_SPEED_MIN) cur_spd = (int)SETTING_SPEED_MIN;
-		if (cur_spd > (int)SETTING_SPEED_MAX) cur_spd = (int)SETTING_SPEED_MAX;
-		SendMessageA(popup->hwnd_slider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)cur_spd);
-
-		popup->hwnd_minus = CreateWindowExA(0, "BUTTON", "-", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						   16, 90, 36, 28, hwnd, (HMENU)ID_POPUP_BTN_MINUS, NULL, NULL);
-		popup->hwnd_b10 = CreateWindowExA(0, "BUTTON", "10%", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						 56, 90, 42, 28, hwnd, (HMENU)ID_POPUP_BTN_10, NULL, NULL);
-		popup->hwnd_b25 = CreateWindowExA(0, "BUTTON", "25%", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						 102, 90, 42, 28, hwnd, (HMENU)ID_POPUP_BTN_25, NULL, NULL);
-		popup->hwnd_b40 = CreateWindowExA(0, "BUTTON", "40%", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						 148, 90, 42, 28, hwnd, (HMENU)ID_POPUP_BTN_40, NULL, NULL);
-		popup->hwnd_b50 = CreateWindowExA(0, "BUTTON", "50%", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						 194, 90, 42, 28, hwnd, (HMENU)ID_POPUP_BTN_50, NULL, NULL);
-		popup->hwnd_b60 = CreateWindowExA(0, "BUTTON", "60%", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						 240, 90, 42, 28, hwnd, (HMENU)ID_POPUP_BTN_60, NULL, NULL);
-		popup->hwnd_plus = CreateWindowExA(0, "BUTTON", "+", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-						  286, 90, 36, 28, hwnd, (HMENU)ID_POPUP_BTN_PLUS, NULL, NULL);
-
-		SendMessageA(popup->hwnd_minus, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-		SendMessageA(popup->hwnd_b10, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-		SendMessageA(popup->hwnd_b25, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-		SendMessageA(popup->hwnd_b40, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-		SendMessageA(popup->hwnd_b50, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-		SendMessageA(popup->hwnd_b60, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-		SendMessageA(popup->hwnd_plus, WM_SETFONT, (WPARAM)popup->hfont_btns, TRUE);
-
-		snprintf(buf, sizeof(buf), "⚡ Speed: %.0f%%", popup->context->speed_percent);
-		SetWindowTextA(popup->hwnd_label, buf);
-		return 0;
-	}
-
-	case WM_CTLCOLORSTATIC: {
-		HDC hdc;
-		hdc = (HDC)wParam;
-		SetTextColor(hdc, RGB(0, 215, 255));
-		SetBkMode(hdc, TRANSPARENT);
-		return (LRESULT)popup->hbr_bg;
-	}
-
-	case WM_CTLCOLORDLG:
-	case WM_ERASEBKGND:
-		return (LRESULT)popup->hbr_bg;
-
-	case WM_HSCROLL: {
-		if (popup && popup->hwnd_slider && (HWND)lParam == popup->hwnd_slider) {
-			int pos;
-			char buf[64];
-			pos = (int)SendMessageA(popup->hwnd_slider, TBM_GETPOS, 0, 0);
-			if (pos < (int)SETTING_SPEED_MIN) pos = (int)SETTING_SPEED_MIN;
-			if (pos > (int)SETTING_SPEED_MAX) pos = (int)SETTING_SPEED_MAX;
-			update_speed(popup->context, (float)pos);
-			snprintf(buf, sizeof(buf), "⚡ Speed: %d%%", pos);
-			SetWindowTextA(popup->hwnd_label, buf);
-		}
-		return 0;
-	}
-
-	case WM_COMMAND: {
-		int id;
-		float new_speed;
-		bool change;
-
-		if (!popup) return 0;
-		id = LOWORD(wParam);
-		new_speed = popup->context->speed_percent;
-		change = false;
-
-		switch (id) {
-		case ID_POPUP_BTN_MINUS:
-			new_speed -= 5.0f;
-			change = true;
-			break;
-		case ID_POPUP_BTN_PLUS:
-			new_speed += 5.0f;
-			change = true;
-			break;
-		case ID_POPUP_BTN_10:
-			new_speed = 10.0f;
-			change = true;
-			break;
-		case ID_POPUP_BTN_25:
-			new_speed = 25.0f;
-			change = true;
-			break;
-		case ID_POPUP_BTN_40:
-			new_speed = 40.0f;
-			change = true;
-			break;
-		case ID_POPUP_BTN_50:
-			new_speed = 50.0f;
-			change = true;
-			break;
-		case ID_POPUP_BTN_60:
-			new_speed = 60.0f;
-			change = true;
-			break;
-		}
-
-		if (change) {
-			char buf[64];
-			if (new_speed < SETTING_SPEED_MIN) new_speed = SETTING_SPEED_MIN;
-			if (new_speed > SETTING_SPEED_MAX) new_speed = SETTING_SPEED_MAX;
-			update_speed(popup->context, new_speed);
-			SendMessageA(popup->hwnd_slider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)(int)new_speed);
-			snprintf(buf, sizeof(buf), "⚡ Speed: %.0f%%", new_speed);
-			SetWindowTextA(popup->hwnd_label, buf);
-		}
-		return 0;
-	}
-
-	case WM_USER_UPDATE_SPEED: {
-		if (popup && popup->hwnd_slider && popup->hwnd_label) {
-			float spd;
-			char buf[64];
-			spd = popup->context->speed_percent;
-			SendMessageA(popup->hwnd_slider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)(int)spd);
-			snprintf(buf, sizeof(buf), "⚡ Speed: %.0f%%", spd);
-			SetWindowTextA(popup->hwnd_label, buf);
-		}
-		return 0;
-	}
-
-	case WM_USER_SHOW_POPUP: {
-		if (popup && popup->hwnd) {
-			int w = 356;
-			int h = 172;
-			int x;
-			int y;
-			RECT rcWork;
-			SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
-			x = rcWork.right - w - 24;
-			y = rcWork.bottom - h - 48;
-			SetWindowPos(popup->hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
-			popup->is_showing = true;
-			SendMessageA(hwnd, WM_USER_UPDATE_SPEED, 0, 0);
-		}
-		return 0;
-	}
-
-	case WM_USER_HIDE_POPUP: {
-		if (popup && popup->hwnd) {
-			ShowWindow(popup->hwnd, SW_HIDE);
-			popup->is_showing = false;
-		}
-		return 0;
-	}
-
-	case WM_CLOSE: {
-		if (popup) {
-			ShowWindow(hwnd, SW_HIDE);
-			popup->is_showing = false;
-		}
-		return 0;
-	}
-
-	case WM_DESTROY: {
-		if (popup) {
-			if (popup->hfont_title) DeleteObject(popup->hfont_title);
-			if (popup->hfont_btns) DeleteObject(popup->hfont_btns);
-			if (popup->hbr_bg) DeleteObject(popup->hbr_bg);
-		}
-		PostQuitMessage(0);
-		return 0;
-	}
-	}
-	return DefWindowProcA(hwnd, msg, wParam, lParam);
-}
-
-static DWORD WINAPI SpeedPopupThread(LPVOID param)
-{
-	struct speed_popup *popup;
-	WNDCLASSA wc;
-	HWND hwnd;
-	MSG msg;
-
-	popup = (struct speed_popup *)param;
-	memset(&wc, 0, sizeof(wc));
-	wc.lpfnWndProc = SpeedPopupWndProc;
-	wc.hInstance = GetModuleHandle(NULL);
-	wc.lpszClassName = "OBSReplaySpeedMeterPopup";
-	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-	wc.hbrBackground = CreateSolidBrush(RGB(24, 26, 32));
-	RegisterClassA(&wc);
-
-	hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-			       "OBSReplaySpeedMeterPopup",
-			       "Replay Speed Meter",
-			       WS_POPUP | WS_CAPTION | WS_SYSMENU,
-			       CW_USEDEFAULT, CW_USEDEFAULT, 356, 172,
-			       NULL, NULL, GetModuleHandle(NULL), popup);
-
-	if (!hwnd)
-		return 0;
-
-	while (GetMessageA(&msg, NULL, 0, 0)) {
-		TranslateMessage(&msg);
-		DispatchMessageA(&msg);
-	}
-
-	UnregisterClassA("OBSReplaySpeedMeterPopup", GetModuleHandle(NULL));
-	return 0;
-}
-
-static void speed_popup_create(struct replay_source *context)
-{
-	struct speed_popup *popup;
-	if (context->speed_popup)
-		return;
-
-	popup = bzalloc(sizeof(struct speed_popup));
-	popup->context = context;
-	context->speed_popup = popup;
-	popup->thread = CreateThread(NULL, 0, SpeedPopupThread, popup, 0, &popup->thread_id);
-	os_sleep_ms(20);
-}
-
-static void speed_popup_show(struct replay_source *context)
-{
-	struct speed_popup *popup;
-	int retries = 0;
-	if (!context->speed_popup)
-		speed_popup_create(context);
-
-	popup = (struct speed_popup *)context->speed_popup;
-	if (!popup)
-		return;
-
-	while (!popup->hwnd && retries < 20) {
-		os_sleep_ms(10);
-		retries++;
-	}
-
-	if (popup->hwnd) {
-		PostMessageA(popup->hwnd, WM_USER_SHOW_POPUP, 0, 0);
-	}
-}
-
-static void speed_popup_hide(struct replay_source *context)
-{
-	struct speed_popup *popup;
-	popup = (struct speed_popup *)context->speed_popup;
-	if (popup && popup->hwnd) {
-		PostMessageA(popup->hwnd, WM_USER_HIDE_POPUP, 0, 0);
-	}
-}
-
-static void speed_popup_notify_speed(struct replay_source *context)
-{
-	struct speed_popup *popup;
-	popup = (struct speed_popup *)context->speed_popup;
-	if (popup && popup->hwnd && popup->is_showing) {
-		PostMessageA(popup->hwnd, WM_USER_UPDATE_SPEED, 0, 0);
-	}
-}
-
-static void speed_popup_destroy(struct replay_source *context)
-{
-	struct speed_popup *popup;
-	popup = (struct speed_popup *)context->speed_popup;
-	if (popup) {
-		if (popup->hwnd) {
-			PostMessageA(popup->hwnd, WM_DESTROY, 0, 0);
-		}
-		if (popup->thread) {
-			WaitForSingleObject(popup->thread, 1000);
-			CloseHandle(popup->thread);
-		}
-		bfree(popup);
-		context->speed_popup = NULL;
-	}
-}
-#else
-static void speed_popup_show(struct replay_source *context) { UNUSED_PARAMETER(context); }
-static void speed_popup_hide(struct replay_source *context) { UNUSED_PARAMETER(context); }
-static void speed_popup_notify_speed(struct replay_source *context) { UNUSED_PARAMETER(context); }
-static void speed_popup_destroy(struct replay_source *context) { UNUSED_PARAMETER(context); }
-#endif
 
 static void replay_source_show(void *data)
 {
@@ -2112,7 +1626,7 @@ void update_speed(struct replay_source *context, float new_speed)
 	pthread_mutex_unlock(&context->video_mutex);
 
 	replay_update_text(context);
-	speed_popup_notify_speed(context);
+	speed_popup_notify(context);
 }
 
 static void replay_faster_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
