@@ -17,11 +17,10 @@
  */
 
 #include "speed-popup.h"
+#include "replay-source-internal.h"
 
 #ifdef _WIN32
 
-#include <obs-module.h>
-#include <util/platform.h>
 #include <windows.h>
 #include <commctrl.h>
 #ifdef _MSC_VER
@@ -29,9 +28,6 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #endif
-
-/* replay_source struct + update_speed / replay_set_forward/backward */
-#include "replay-source-internal.h"
 
 /* ------------------------------------------------------------------ */
 /*  Window messages (private to this file)                            */

@@ -11,7 +11,17 @@
 #pragma once
 
 #include <obs-module.h>
+#include <util/platform.h>
 #include <util/threading.h>
+#if LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 1, 0)
+#include <util/deque.h>
+#else
+#include <util/circlebuf.h>
+#endif
+#include <media-io/video-io.h>
+#include <media-io/video-frame.h>
+#include <media-io/video-scaler.h>
+#include <media-io/audio-io.h>
 #include "replay.h"
 
 /* ------------------------------------------------------------------ */
