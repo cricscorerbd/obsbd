@@ -51,6 +51,15 @@
 #define ID_BTN_FORWARD  2071
 
 /* ------------------------------------------------------------------ */
+/*  Position persistence across show/hide and re-triggers             */
+/* ------------------------------------------------------------------ */
+static int  s_saved_x       = -1;
+static int  s_saved_y       = -1;
+static int  s_saved_w       = 450;
+static int  s_saved_h       = 240;
+static bool s_has_saved_pos = false;
+
+/* ------------------------------------------------------------------ */
 /*  Internal struct                                                    */
 /* ------------------------------------------------------------------ */
 struct speed_popup {
@@ -73,6 +82,11 @@ struct speed_popup {
 	HANDLE thread;
 	DWORD  thread_id;
 	bool   is_showing;
+	int    saved_x;
+	int    saved_y;
+	int    saved_w;
+	int    saved_h;
+	bool   has_saved_pos;
 };
 
 /* ------------------------------------------------------------------ */
@@ -100,34 +114,51 @@ static void popup_refresh_dir_buttons(struct speed_popup *p)
 
 static void popup_layout(struct speed_popup *p, HWND hwnd)
 {
+	if (!p || !p->hwnd_label)
+		return;
+
 	RECT rc;
 	GetClientRect(hwnd, &rc);
 	int cw  = rc.right - rc.left;
-	int pad = 12;
+	int ch  = rc.bottom - rc.top;
+	int pad = 14;
 
-	int label_y   = 10,  label_h  = 26;
-	int slider_y  = label_y  + label_h  + 4,  slider_h = 34;
-	int spdbtn_y  = slider_y + slider_h + 6,  spdbtn_h = 28;
-	int dirbtn_y  = spdbtn_y + spdbtn_h + 6,  dirbtn_h = 28;
+	if (cw <= 0 || ch <= 0)
+		return;
 
-	MoveWindow(p->hwnd_label,  pad,     label_y,  cw - pad*2,       label_h,  TRUE);
-	MoveWindow(p->hwnd_slider, pad - 2, slider_y, cw - (pad-2)*2,   slider_h, TRUE);
+	int label_y  = pad;
+	int label_h  = (ch >= 250) ? 30 : 24;
+	int slider_y = label_y + label_h + 4;
+	int slider_h = 32;
 
-	int area    = cw - pad * 2;
-	int bws     = area / 8;
-	int bwm     = (area - bws * 2) / 5;
-	HWND sb[7]  = {p->hwnd_minus, p->hwnd_b10, p->hwnd_b25,
-	               p->hwnd_b40,   p->hwnd_b50, p->hwnd_b60, p->hwnd_plus};
+	int remaining_h = ch - (slider_y + slider_h) - pad;
+	int btn_gap = 8;
+	int btn_h = (remaining_h - btn_gap) / 2;
+	if (btn_h < 26) btn_h = 26;
+	if (btn_h > 46) btn_h = 46;
+
+	int spdbtn_y = slider_y + slider_h + btn_gap;
+	int dirbtn_y = spdbtn_y + btn_h + btn_gap;
+
+	MoveWindow(p->hwnd_label,  pad,     label_y,  cw - pad * 2,       label_h,  TRUE);
+	MoveWindow(p->hwnd_slider, pad - 2, slider_y, cw - (pad - 2) * 2, slider_h, TRUE);
+
+	int area = cw - pad * 2;
+	if (area < 10) area = 10;
+	int bws = area / 8;
+	int bwm = (area - bws * 2) / 5;
+	HWND sb[7] = {p->hwnd_minus, p->hwnd_b10, p->hwnd_b25,
+	              p->hwnd_b40,   p->hwnd_b50, p->hwnd_b60, p->hwnd_plus};
 	int bx = pad;
 	for (int i = 0; i < 7; i++) {
 		int bw = (i == 0 || i == 6) ? bws : bwm;
-		MoveWindow(sb[i], bx, spdbtn_y, bw, spdbtn_h, TRUE);
+		MoveWindow(sb[i], bx, spdbtn_y, bw, btn_h, TRUE);
 		bx += bw + 2;
 	}
 
 	int dh = (area - 6) / 2;
-	MoveWindow(p->hwnd_backward, pad,           dirbtn_y, dh, dirbtn_h, TRUE);
-	MoveWindow(p->hwnd_forward,  pad + dh + 6,  dirbtn_y, dh, dirbtn_h, TRUE);
+	MoveWindow(p->hwnd_backward, pad,          dirbtn_y, dh, btn_h, TRUE);
+	MoveWindow(p->hwnd_forward,  pad + dh + 6, dirbtn_y, dh, btn_h, TRUE);
 
 	InvalidateRect(hwnd, NULL, TRUE);
 }
@@ -156,6 +187,14 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		p->hfont_btns = CreateFontA(13, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
 			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
 			DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+
+		if (s_has_saved_pos) {
+			p->saved_x = s_saved_x;
+			p->saved_y = s_saved_y;
+			p->saved_w = s_saved_w;
+			p->saved_h = s_saved_h;
+			p->has_saved_pos = true;
+		}
 
 		p->hwnd_label = CreateWindowExA(0, "STATIC", "",
 			WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -206,14 +245,36 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		return 0;
 	}
 
+	case WM_ERASEBKGND: {
+		if (p && p->hbr_bg) {
+			HDC hdc = (HDC)wParam;
+			RECT rc;
+			GetClientRect(hwnd, &rc);
+			FillRect(hdc, &rc, p->hbr_bg);
+			return 1;
+		}
+		return 0;
+	}
+
+	case WM_PAINT: {
+		PAINTSTRUCT ps;
+		HDC hdc = BeginPaint(hwnd, &ps);
+		if (p && p->hbr_bg) {
+			FillRect(hdc, &ps.rcPaint, p->hbr_bg);
+		}
+		EndPaint(hwnd, &ps);
+		return 0;
+	}
+
 	case WM_CTLCOLORSTATIC: {
 		HDC hdc = (HDC)wParam;
 		SetTextColor(hdc, RGB(0, 215, 255));
-		SetBkMode(hdc, TRANSPARENT);
+		SetBkColor(hdc, RGB(24, 26, 32));
 		return (LRESULT)p->hbr_bg;
 	}
+
 	case WM_CTLCOLORDLG:
-	case WM_ERASEBKGND:
+	case WM_CTLCOLORBTN:
 		return (LRESULT)p->hbr_bg;
 
 	case WM_HSCROLL: {
@@ -262,27 +323,80 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		return 0;
 	}
 
+	case WM_WINDOWPOSCHANGED: {
+		WINDOWPOS *wp = (WINDOWPOS *)lParam;
+		if (p && (!(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE))) {
+			if (!IsIconic(hwnd) && IsWindowVisible(hwnd)) {
+				RECT wr;
+				GetWindowRect(hwnd, &wr);
+				p->saved_x = wr.left;
+				p->saved_y = wr.top;
+				p->saved_w = wr.right - wr.left;
+				p->saved_h = wr.bottom - wr.top;
+				p->has_saved_pos = true;
+				s_saved_x = p->saved_x;
+				s_saved_y = p->saved_y;
+				s_saved_w = p->saved_w;
+				s_saved_h = p->saved_h;
+				s_has_saved_pos = true;
+			}
+		}
+		return DefWindowProcA(hwnd, msg, wParam, lParam);
+	}
+
 	case WM_SIZE:
-		if (p) popup_layout(p, hwnd);
+		if (p) {
+			popup_layout(p, hwnd);
+		}
 		return 0;
 
 	case WM_GETMINMAXINFO: {
 		MINMAXINFO *mmi = (MINMAXINFO *)lParam;
 		mmi->ptMinTrackSize.x = 360;
-		mmi->ptMinTrackSize.y = 200;
+		mmi->ptMinTrackSize.y = 190;
 		return 0;
 	}
 
 	case WM_USER_SHOW_POPUP: {
 		if (p && p->hwnd) {
-			int w = 450, h = 240;
-			RECT rcWork;
-			SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
-			int x = rcWork.right  - w - 24;
-			int y = rcWork.bottom - h - 48;
-			SetWindowPos(p->hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+			int sx, sy, sw, sh;
+			if (p->has_saved_pos || s_has_saved_pos) {
+				sx = p->has_saved_pos ? p->saved_x : s_saved_x;
+				sy = p->has_saved_pos ? p->saved_y : s_saved_y;
+				sw = p->has_saved_pos ? p->saved_w : s_saved_w;
+				sh = p->has_saved_pos ? p->saved_h : s_saved_h;
+				POINT pt = {sx + 50, sy + 50};
+				HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+				if (!hMon) {
+					RECT rcWork;
+					SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
+					sx = rcWork.right  - sw - 24;
+					sy = rcWork.bottom - sh - 48;
+				}
+			} else {
+				sw = 450;
+				sh = 240;
+				RECT rcWork;
+				SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
+				sx = rcWork.right  - sw - 24;
+				sy = rcWork.bottom - sh - 48;
+				p->saved_x = sx;
+				p->saved_y = sy;
+				p->saved_w = sw;
+				p->saved_h = sh;
+				p->has_saved_pos = true;
+				s_saved_x = sx;
+				s_saved_y = sy;
+				s_saved_w = sw;
+				s_saved_h = sh;
+				s_has_saved_pos = true;
+			}
+			SetWindowPos(p->hwnd, HWND_TOPMOST, sx, sy, sw, sh,
+			             SWP_SHOWWINDOW | SWP_NOACTIVATE);
 			p->is_showing = true;
-			PostMessageA(hwnd, WM_SIZE, 0, MAKELPARAM(w, h));
+			popup_layout(p, hwnd);
+			InvalidateRect(p->hwnd, NULL, TRUE);
+			UpdateWindow(p->hwnd);
 			SendMessageA(hwnd, WM_USER_UPDATE_ALL, 0, 0);
 		}
 		return 0;
@@ -333,11 +447,12 @@ static DWORD WINAPI SpeedPopupThread(LPVOID param)
 	WNDCLASSA wc = {0};
 	MSG msg;
 
+	wc.style         = CS_HREDRAW | CS_VREDRAW;
 	wc.lpfnWndProc   = SpeedPopupWndProc;
 	wc.hInstance     = GetModuleHandle(NULL);
 	wc.lpszClassName = "OBSReplaySpeedMeterPopup";
 	wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-	wc.hbrBackground = CreateSolidBrush(RGB(24, 26, 32));
+	wc.hbrBackground = NULL;
 	RegisterClassA(&wc);
 
 	HWND hwnd = CreateWindowExA(
