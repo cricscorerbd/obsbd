@@ -86,6 +86,7 @@ void replay_filter_check(void *data);
 #define SETTING_SPEED "speed_percent"
 #define SETTING_SPEED_MIN 3.0f
 #define SETTING_SPEED_MAX 60.0f
+#define SETTING_SMOOTH_SLOWMOTION "smooth_slowmotion"
 #define SETTING_BACKWARD "backward"
 #define SETTING_VISIBILITY_ACTION "visibility_action"
 #define SETTING_START_DELAY "start_delay"

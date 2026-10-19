@@ -133,6 +133,8 @@ struct replay_source {
 
 	uint64_t video_frame_position;
 	uint64_t video_save_position;
+	bool smooth_slowmotion;
+	struct obs_source_frame *blended_frame;
 
 	uint64_t audio_frame_position;
 	struct obs_audio_data audio_output;
