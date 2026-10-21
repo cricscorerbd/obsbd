@@ -90,8 +90,6 @@ void replay_filter_check(void *data);
 #define SETTING_ZOOM "zoom_percent"
 #define SETTING_ZOOM_MIN 100.0f
 #define SETTING_ZOOM_MAX 300.0f
-#define SETTING_ZOOM_PAN_X "zoom_pan_x"
-#define SETTING_ZOOM_PAN_Y "zoom_pan_y"
 #define SETTING_BACKWARD "backward"
 #define SETTING_VISIBILITY_ACTION "visibility_action"
 #define SETTING_START_DELAY "start_delay"

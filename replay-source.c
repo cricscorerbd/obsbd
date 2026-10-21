@@ -410,7 +410,6 @@ static void replay_update_position(struct replay_source *context, bool lock)
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(context);
 	replay_update_text(context);
 	context->start_timestamp = obs_get_video_frame_time();
 	context->backward = context->backward_start;
@@ -522,8 +521,6 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, SETTING_REPLAYS, 1);
 	obs_data_set_default_int(settings, SETTING_SPEED, 60);
 	obs_data_set_default_double(settings, SETTING_ZOOM, 100.0);
-	obs_data_set_default_double(settings, SETTING_ZOOM_PAN_X, 0.0);
-	obs_data_set_default_double(settings, SETTING_ZOOM_PAN_Y, 0.0);
 	obs_data_set_default_int(settings, SETTING_VISIBILITY_ACTION, VISIBILITY_ACTION_CONTINUE);
 	obs_data_set_default_int(settings, SETTING_START_DELAY, 0);
 	obs_data_set_default_int(settings, SETTING_FRAME_STEP_COUNT, 5);
@@ -592,7 +589,6 @@ void replay_restart(void *data)
 	struct replay_source *c = data;
 	c->restart = true;
 	c->play = true;
-	replay_reset_zoom(c);
 	obs_source_signal(c->source, "media_restart");
 	speed_popup_show(c);
 }
@@ -1130,7 +1126,6 @@ static void replay_retrieve(struct replay_source *context)
 		obs_data_set_double(settings_ret, SETTING_SPEED, 60.0);
 		obs_data_release(settings_ret);
 	}
-	replay_reset_zoom(context);
 	replay_update_text(context);
 
 	blog(LOG_INFO, "[replay_source: '%s'] replay added of %.2f seconds", obs_source_get_name(context->source),
@@ -1386,27 +1381,10 @@ static struct obs_source_frame *replay_get_zoomed_frame(struct replay_source *co
 	if (crop_w >= src->width && crop_h >= src->height)
 		return src;
 
-	/* Pan support: zoom_pan_x (-100..100) and zoom_pan_y (-100..100) */
-	float max_pan_x = (float)(src->width - crop_w);
-	float pan_norm_x = (context->zoom_pan_x + 100.0f) / 200.0f;
-	if (pan_norm_x < 0.0f) pan_norm_x = 0.0f;
-	if (pan_norm_x > 1.0f) pan_norm_x = 1.0f;
-	uint32_t crop_x = (uint32_t)(max_pan_x * pan_norm_x);
-
-	float max_pan_y = (float)(src->height - crop_h);
-	float pan_norm_y = (context->zoom_pan_y + 100.0f) / 200.0f;
-	if (pan_norm_y < 0.0f) pan_norm_y = 0.0f;
-	if (pan_norm_y > 1.0f) pan_norm_y = 1.0f;
-	uint32_t crop_y = (uint32_t)(max_pan_y * pan_norm_y);
-
+	uint32_t crop_x = ((src->width - crop_w) / 2);
+	uint32_t crop_y = ((src->height - crop_h) / 2);
 	crop_x = (crop_x >> 1) << 1;
 	crop_y = (crop_y >> 1) << 1;
-	if (crop_x + crop_w > src->width) {
-		crop_x = (src->width - crop_w) & ~1;
-	}
-	if (crop_y + crop_h > src->height) {
-		crop_y = (src->height - crop_h) & ~1;
-	}
 
 	const uint8_t *crop_data[MAX_AV_PLANES];
 	if (!get_cropped_pointers(src, crop_x, crop_y, crop_data))
@@ -1504,7 +1482,6 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(c);
 	replay_update_text(c);
 	c->restart = false;
 	c->start_timestamp = os_timestamp;
@@ -1547,7 +1524,6 @@ static struct obs_source_frame *replay_restart_at_end(struct replay_source *c, c
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(c);
 	replay_update_text(c);
 	frame = c->current_replay.video_frames[c->video_frame_position];
 	duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp - (int64_t)c->current_replay.first_frame_timestamp) *
@@ -1833,11 +1809,6 @@ void update_zoom(struct replay_source *context, float new_zoom)
 	if (new_zoom > SETTING_ZOOM_MAX)
 		new_zoom = SETTING_ZOOM_MAX;
 
-	if (new_zoom <= 100.5f) {
-		context->zoom_pan_x = 0.0f;
-		context->zoom_pan_y = 0.0f;
-	}
-
 	if (fabsf(new_zoom - context->zoom_percent) < 0.1f)
 		return;
 
@@ -1864,71 +1835,6 @@ void update_zoom(struct replay_source *context, float new_zoom)
 	obs_data_t *settings = obs_source_get_settings(context->source);
 	if (settings) {
 		obs_data_set_double(settings, SETTING_ZOOM, (double)new_zoom);
-		if (new_zoom <= 100.5f) {
-			obs_data_set_double(settings, SETTING_ZOOM_PAN_X, 0.0);
-			obs_data_set_double(settings, SETTING_ZOOM_PAN_Y, 0.0);
-		}
-		obs_data_release(settings);
-	}
-
-	speed_popup_notify(context);
-}
-
-void update_zoom_pan(struct replay_source *context, float pan_x, float pan_y)
-{
-	if (pan_x < -100.0f) pan_x = -100.0f;
-	if (pan_x > 100.0f)  pan_x = 100.0f;
-	if (pan_y < -100.0f) pan_y = -100.0f;
-	if (pan_y > 100.0f)  pan_y = 100.0f;
-
-	if (fabsf(pan_x - context->zoom_pan_x) < 0.1f &&
-	    fabsf(pan_y - context->zoom_pan_y) < 0.1f)
-		return;
-
-	pthread_mutex_lock(&context->video_mutex);
-	context->zoom_pan_x = pan_x;
-	context->zoom_pan_y = pan_y;
-
-	/* If paused or stepped, immediately re-render current frame with new pan */
-	if (!context->play && context->current_replay.video_frame_count) {
-		uint64_t pos = context->video_frame_position;
-		if (pos >= context->current_replay.video_frame_count)
-			pos = context->current_replay.video_frame_count - 1;
-		struct obs_source_frame *frame = context->current_replay.video_frames[pos];
-		if (frame) {
-			uint64_t os_timestamp = obs_get_video_frame_time();
-			uint64_t t = frame->timestamp;
-			frame->timestamp = os_timestamp;
-			struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
-			obs_source_output_video(context->source, out);
-			frame->timestamp = t;
-		}
-	}
-	pthread_mutex_unlock(&context->video_mutex);
-
-	obs_data_t *settings = obs_source_get_settings(context->source);
-	if (settings) {
-		obs_data_set_double(settings, SETTING_ZOOM_PAN_X, (double)pan_x);
-		obs_data_set_double(settings, SETTING_ZOOM_PAN_Y, (double)pan_y);
-		obs_data_release(settings);
-	}
-
-	speed_popup_notify(context);
-}
-
-void replay_reset_zoom(struct replay_source *context)
-{
-	pthread_mutex_lock(&context->video_mutex);
-	context->zoom_percent = 100.0f;
-	context->zoom_pan_x = 0.0f;
-	context->zoom_pan_y = 0.0f;
-	pthread_mutex_unlock(&context->video_mutex);
-
-	obs_data_t *settings = obs_source_get_settings(context->source);
-	if (settings) {
-		obs_data_set_double(settings, SETTING_ZOOM, 100.0);
-		obs_data_set_double(settings, SETTING_ZOOM_PAN_X, 0.0);
-		obs_data_set_double(settings, SETTING_ZOOM_PAN_Y, 0.0);
 		obs_data_release(settings);
 	}
 
@@ -2366,10 +2272,6 @@ static void replay_source_update(void *data, obs_data_t *settings)
 	if (new_zoom < SETTING_ZOOM_MIN || new_zoom > SETTING_ZOOM_MAX)
 		new_zoom = 100.0f;
 	update_zoom(context, new_zoom);
-
-	float pan_x = (float)obs_data_get_double(settings, SETTING_ZOOM_PAN_X);
-	float pan_y = (float)obs_data_get_double(settings, SETTING_ZOOM_PAN_Y);
-	update_zoom_pan(context, pan_x, pan_y);
 
 	context->backward_start = obs_data_get_bool(settings, SETTING_BACKWARD);
 	if (context->backward != context->backward_start) {
@@ -3405,8 +3307,6 @@ static obs_properties_t *replay_source_properties(void *data)
 					SETTING_SPEED_MAX, 1.0);
 	obs_properties_add_float_slider(props, SETTING_ZOOM, obs_module_text("ZoomPercentage"), SETTING_ZOOM_MIN,
 					SETTING_ZOOM_MAX, 5.0);
-	obs_properties_add_float_slider(props, SETTING_ZOOM_PAN_X, obs_module_text("ZoomPanX"), -100.0, 100.0, 1.0);
-	obs_properties_add_float_slider(props, SETTING_ZOOM_PAN_Y, obs_module_text("ZoomPanY"), -100.0, 100.0, 1.0);
 	obs_properties_add_bool(props, SETTING_SPEED_POPUP_ALWAYS_SHOW, obs_module_text("SpeedPopupAlwaysShow"));
 	obs_properties_add_bool(props, SETTING_BACKWARD, obs_module_text("Backwards"));
 
