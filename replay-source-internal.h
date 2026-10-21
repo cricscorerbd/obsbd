@@ -164,6 +164,8 @@ struct replay_source {
 	void *speed_popup;
 
 	float zoom_percent;
+	float zoom_pan_x;
+	float zoom_pan_y;
 	video_scaler_t *zoom_scaler;
 	uint32_t zoom_scaler_crop_w;
 	uint32_t zoom_scaler_crop_h;
@@ -189,3 +191,9 @@ void replay_toggle_play_pause(struct replay_source *context);
 
 /* Update zoom percentage (100.0f = 1.0x up to 300.0f = 3.0x). */
 void update_zoom(struct replay_source *context, float new_zoom);
+
+/* Update zoom pan offset (-100.0f to +100.0f for X and Y). */
+void update_zoom_pan(struct replay_source *context, float pan_x, float pan_y);
+
+/* Reset zoom and pan back to 100% and center. */
+void replay_reset_zoom(struct replay_source *context);
