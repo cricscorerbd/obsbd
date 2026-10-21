@@ -50,6 +50,14 @@
 #define ID_BTN_BACKWARD 2070
 #define ID_BTN_FORWARD  2071
 #define ID_BTN_PLAY_PAUSE 2072
+#define ID_SLIDER_ZOOM       2080
+#define ID_BTN_ZOOM_MINUS    2081
+#define ID_BTN_ZOOM_PLUS     2082
+#define ID_BTN_ZOOM_100      2083
+#define ID_BTN_ZOOM_125      2084
+#define ID_BTN_ZOOM_150      2085
+#define ID_BTN_ZOOM_200      2086
+#define ID_BTN_ZOOM_300      2087
 
 /* ------------------------------------------------------------------ */
 /*  Position persistence across show/hide and re-triggers             */
@@ -57,7 +65,7 @@
 static int  s_saved_x       = -1;
 static int  s_saved_y       = -1;
 static int  s_saved_w       = 450;
-static int  s_saved_h       = 285;
+static int  s_saved_h       = 390;
 static bool s_has_saved_pos = false;
 
 /* ------------------------------------------------------------------ */
@@ -78,6 +86,15 @@ struct speed_popup {
 	HWND   hwnd_backward;
 	HWND   hwnd_forward;
 	HWND   hwnd_play_pause;
+	HWND   hwnd_zoom_label;
+	HWND   hwnd_slider_zoom;
+	HWND   hwnd_zoom_minus;
+	HWND   hwnd_zoom_plus;
+	HWND   hwnd_zoom_100;
+	HWND   hwnd_zoom_125;
+	HWND   hwnd_zoom_150;
+	HWND   hwnd_zoom_200;
+	HWND   hwnd_zoom_300;
 	HFONT  hfont_title;
 	HFONT  hfont_btns;
 	HBRUSH hbr_bg;
@@ -122,6 +139,19 @@ static void popup_refresh_play_pause_button(struct speed_popup *p)
 	SetWindowTextW(p->hwnd_play_pause, is_playing ? L"||  Pause" : L"\u25BA  Play");
 }
 
+static void popup_refresh_zoom_label(struct speed_popup *p)
+{
+	if (!p || !p->hwnd_zoom_label || !p->context)
+		return;
+	char buf[96];
+	float zm = p->context->zoom_percent;
+	if (zm <= 100.5f)
+		snprintf(buf, sizeof(buf), "Zoom: 1.0x (100%% - Normal)");
+	else
+		snprintf(buf, sizeof(buf), "Zoom: %.2fx (%.0f%%)", zm / 100.0f, zm);
+	SetWindowTextA(p->hwnd_zoom_label, buf);
+}
+
 static void popup_layout(struct speed_popup *p, HWND hwnd)
 {
 	if (!p || !p->hwnd_label)
@@ -131,31 +161,29 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 	GetClientRect(hwnd, &rc);
 	int cw  = rc.right - rc.left;
 	int ch  = rc.bottom - rc.top;
-	int pad = 14;
+	int pad = 12;
 
 	if (cw <= 0 || ch <= 0)
 		return;
 
-	int label_y  = pad;
-	int label_h  = (ch >= 250) ? 30 : 24;
-	int slider_y = label_y + label_h + 4;
-	int slider_h = 32;
+	int area = cw - pad * 2;
+	if (area < 10) area = 10;
 
-	int remaining_h = ch - (slider_y + slider_h) - pad;
-	int btn_gap = 8;
-	int btn_h = (remaining_h - btn_gap * 2) / 3;
-	if (btn_h < 26) btn_h = 26;
-	if (btn_h > 44) btn_h = 44;
+	/* Speed section */
+	int label_y   = pad;
+	int label_h   = 24;
+	int slider_y  = label_y + label_h + 2;
+	int slider_h  = 28;
+	int btn_h     = 26;
+	int btn_gap   = 6;
 
-	int spdbtn_y = slider_y + slider_h + btn_gap;
-	int dirbtn_y = spdbtn_y + btn_h + btn_gap;
+	int spdbtn_y  = slider_y + slider_h + btn_gap;
+	int dirbtn_y  = spdbtn_y + btn_h + btn_gap;
 	int playbtn_y = dirbtn_y + btn_h + btn_gap;
 
 	MoveWindow(p->hwnd_label,  pad,     label_y,  cw - pad * 2,       label_h,  TRUE);
 	MoveWindow(p->hwnd_slider, pad - 2, slider_y, cw - (pad - 2) * 2, slider_h, TRUE);
 
-	int area = cw - pad * 2;
-	if (area < 10) area = 10;
 	int bws = area / 8;
 	int bwm = (area - bws * 2) / 5;
 	HWND sb[7] = {p->hwnd_minus, p->hwnd_b10, p->hwnd_b25,
@@ -175,6 +203,27 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 		int play_w = dh;
 		int play_x = pad + (area - play_w) / 2;
 		MoveWindow(p->hwnd_play_pause, play_x, playbtn_y, play_w, btn_h, TRUE);
+	}
+
+	/* Zoom section */
+	if (p->hwnd_zoom_label && p->hwnd_slider_zoom) {
+		int zlabel_y  = playbtn_y + btn_h + 10;
+		int zlabel_h  = 22;
+		int zslider_y = zlabel_y + zlabel_h + 2;
+		int zslider_h = 28;
+		int zbtn_y    = zslider_y + zslider_h + btn_gap;
+
+		MoveWindow(p->hwnd_zoom_label,  pad,     zlabel_y,  cw - pad * 2,       zlabel_h,  TRUE);
+		MoveWindow(p->hwnd_slider_zoom, pad - 2, zslider_y, cw - (pad - 2) * 2, zslider_h, TRUE);
+
+		HWND zb[7] = {p->hwnd_zoom_minus, p->hwnd_zoom_100, p->hwnd_zoom_125,
+		              p->hwnd_zoom_150,   p->hwnd_zoom_200, p->hwnd_zoom_300, p->hwnd_zoom_plus};
+		int zbx = pad;
+		for (int i = 0; i < 7; i++) {
+			int bw = (i == 0 || i == 6) ? bws : bwm;
+			MoveWindow(zb[i], zbx, zbtn_y, bw, btn_h, TRUE);
+			zbx += bw + 2;
+		}
 	}
 
 	InvalidateRect(hwnd, NULL, TRUE);
@@ -263,9 +312,43 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_PLAY_PAUSE, NULL, NULL);
 		SendMessageA(p->hwnd_play_pause, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 
+		/* Zoom label and slider */
+		p->hwnd_zoom_label = CreateWindowExA(0, "STATIC", "",
+			WS_CHILD | WS_VISIBLE | SS_LEFT,
+			0, 0, 10, 10, hwnd, NULL, NULL, NULL);
+		SendMessageA(p->hwnd_zoom_label, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
+
+		p->hwnd_slider_zoom = CreateWindowExA(0, TRACKBAR_CLASSA, "",
+			WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_NOTICKS,
+			0, 0, 10, 10, hwnd, (HMENU)ID_SLIDER_ZOOM, NULL, NULL);
+		SendMessageA(p->hwnd_slider_zoom, TBM_SETRANGE, TRUE,
+			MAKELONG((int)SETTING_ZOOM_MIN, (int)SETTING_ZOOM_MAX));
+		int cur_zm = (int)p->context->zoom_percent;
+		if (cur_zm < (int)SETTING_ZOOM_MIN) cur_zm = (int)SETTING_ZOOM_MIN;
+		if (cur_zm > (int)SETTING_ZOOM_MAX) cur_zm = (int)SETTING_ZOOM_MAX;
+		SendMessageA(p->hwnd_slider_zoom, TBM_SETPOS, TRUE, cur_zm);
+
+		/* Zoom quick preset buttons */
+		struct { HWND *h; const char *txt; int id; } zb[] = {
+			{&p->hwnd_zoom_minus, "-",     ID_BTN_ZOOM_MINUS},
+			{&p->hwnd_zoom_100,   "1.0x",  ID_BTN_ZOOM_100},
+			{&p->hwnd_zoom_125,   "1.25x", ID_BTN_ZOOM_125},
+			{&p->hwnd_zoom_150,   "1.5x",  ID_BTN_ZOOM_150},
+			{&p->hwnd_zoom_200,   "2.0x",  ID_BTN_ZOOM_200},
+			{&p->hwnd_zoom_300,   "3.0x",  ID_BTN_ZOOM_300},
+			{&p->hwnd_zoom_plus,  "+",     ID_BTN_ZOOM_PLUS},
+		};
+		for (int i = 0; i < 7; i++) {
+			*zb[i].h = CreateWindowExA(0, "BUTTON", zb[i].txt,
+				WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+				0, 0, 10, 10, hwnd, (HMENU)(intptr_t)zb[i].id, NULL, NULL);
+			SendMessageA(*zb[i].h, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
+		}
+
 		popup_refresh_label(p);
 		popup_refresh_dir_buttons(p);
 		popup_refresh_play_pause_button(p);
+		popup_refresh_zoom_label(p);
 		return 0;
 	}
 
@@ -292,7 +375,12 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 
 	case WM_CTLCOLORSTATIC: {
 		HDC hdc = (HDC)wParam;
-		SetTextColor(hdc, RGB(0, 215, 255));
+		HWND hCtl = (HWND)lParam;
+		if (p && hCtl == p->hwnd_zoom_label) {
+			SetTextColor(hdc, RGB(255, 215, 0));
+		} else {
+			SetTextColor(hdc, RGB(0, 215, 255));
+		}
 		SetBkColor(hdc, RGB(24, 26, 32));
 		return (LRESULT)p->hbr_bg;
 	}
@@ -308,6 +396,12 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			if (pos > (int)SETTING_SPEED_MAX) pos = (int)SETTING_SPEED_MAX;
 			update_speed(p->context, (float)pos);
 			popup_refresh_label(p);
+		} else if (p && p->hwnd_slider_zoom && (HWND)lParam == p->hwnd_slider_zoom) {
+			int pos = (int)SendMessageA(p->hwnd_slider_zoom, TBM_GETPOS, 0, 0);
+			if (pos < (int)SETTING_ZOOM_MIN) pos = (int)SETTING_ZOOM_MIN;
+			if (pos > (int)SETTING_ZOOM_MAX) pos = (int)SETTING_ZOOM_MAX;
+			update_zoom(p->context, (float)pos);
+			popup_refresh_zoom_label(p);
 		}
 		return 0;
 	}
@@ -317,6 +411,8 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		int id = LOWORD(wParam);
 		float spd = p->context->speed_percent;
 		bool chg = false;
+		float zm = p->context->zoom_percent;
+		bool zm_chg = false;
 
 		switch (id) {
 		case ID_BTN_MINUS:   spd -= 5.0f; chg = true; break;
@@ -340,6 +436,13 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			replay_toggle_play_pause(p->context);
 			popup_refresh_play_pause_button(p);
 			break;
+		case ID_BTN_ZOOM_MINUS: zm -= 10.0f; zm_chg = true; break;
+		case ID_BTN_ZOOM_PLUS:  zm += 10.0f; zm_chg = true; break;
+		case ID_BTN_ZOOM_100:   zm = 100.0f; zm_chg = true; break;
+		case ID_BTN_ZOOM_125:   zm = 125.0f; zm_chg = true; break;
+		case ID_BTN_ZOOM_150:   zm = 150.0f; zm_chg = true; break;
+		case ID_BTN_ZOOM_200:   zm = 200.0f; zm_chg = true; break;
+		case ID_BTN_ZOOM_300:   zm = 300.0f; zm_chg = true; break;
 		}
 		if (chg) {
 			if (spd < SETTING_SPEED_MIN) spd = SETTING_SPEED_MIN;
@@ -347,6 +450,13 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			update_speed(p->context, spd);
 			SendMessageA(p->hwnd_slider, TBM_SETPOS, TRUE, (LPARAM)(int)spd);
 			popup_refresh_label(p);
+		}
+		if (zm_chg) {
+			if (zm < SETTING_ZOOM_MIN) zm = SETTING_ZOOM_MIN;
+			if (zm > SETTING_ZOOM_MAX) zm = SETTING_ZOOM_MAX;
+			update_zoom(p->context, zm);
+			SendMessageA(p->hwnd_slider_zoom, TBM_SETPOS, TRUE, (LPARAM)(int)zm);
+			popup_refresh_zoom_label(p);
 		}
 		return 0;
 	}
@@ -381,7 +491,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 	case WM_GETMINMAXINFO: {
 		MINMAXINFO *mmi = (MINMAXINFO *)lParam;
 		mmi->ptMinTrackSize.x = 360;
-		mmi->ptMinTrackSize.y = 230;
+		mmi->ptMinTrackSize.y = 350;
 		return 0;
 	}
 
@@ -403,7 +513,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 				}
 			} else {
 				sw = 450;
-				sh = 285;
+				sh = 390;
 				RECT rcWork;
 				SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
 				sx = rcWork.right  - sw - 24;
@@ -447,6 +557,13 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			popup_refresh_dir_buttons(p);
 			popup_refresh_play_pause_button(p);
 		}
+		if (p && p->hwnd_slider_zoom && p->hwnd_zoom_label) {
+			int zpos = (int)p->context->zoom_percent;
+			if (zpos < (int)SETTING_ZOOM_MIN) zpos = (int)SETTING_ZOOM_MIN;
+			if (zpos > (int)SETTING_ZOOM_MAX) zpos = (int)SETTING_ZOOM_MAX;
+			SendMessageA(p->hwnd_slider_zoom, TBM_SETPOS, TRUE, zpos);
+			popup_refresh_zoom_label(p);
+		}
 		return 0;
 	}
 
@@ -489,7 +606,7 @@ static DWORD WINAPI SpeedPopupThread(LPVOID param)
 		"OBSReplaySpeedMeterPopup",
 		"Replay Speed Meter",
 		WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 450, 285,
+		CW_USEDEFAULT, CW_USEDEFAULT, 450, 390,
 		NULL, NULL, GetModuleHandle(NULL), p);
 
 	if (!hwnd) {

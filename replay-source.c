@@ -520,6 +520,7 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, SETTING_DURATION, 5000);
 	obs_data_set_default_int(settings, SETTING_REPLAYS, 1);
 	obs_data_set_default_int(settings, SETTING_SPEED, 60);
+	obs_data_set_default_double(settings, SETTING_ZOOM, 100.0);
 	obs_data_set_default_int(settings, SETTING_VISIBILITY_ACTION, VISIBILITY_ACTION_CONTINUE);
 	obs_data_set_default_int(settings, SETTING_START_DELAY, 0);
 	obs_data_set_default_int(settings, SETTING_FRAME_STEP_COUNT, 5);
@@ -1315,6 +1316,151 @@ static void replay_next_scene_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t 
 	}
 }
 
+static bool get_cropped_pointers(const struct obs_source_frame *src, uint32_t crop_x, uint32_t crop_y,
+				  const uint8_t *crop_data[MAX_AV_PLANES])
+{
+	for (size_t i = 0; i < MAX_AV_PLANES; i++) {
+		crop_data[i] = NULL;
+	}
+
+	switch (src->format) {
+	case VIDEO_FORMAT_NV12:
+		crop_data[0] = src->data[0] + (size_t)crop_y * src->linesize[0] + crop_x;
+		crop_data[1] = src->data[1] + (size_t)(crop_y / 2) * src->linesize[1] + crop_x;
+		return true;
+
+	case VIDEO_FORMAT_I420:
+		crop_data[0] = src->data[0] + (size_t)crop_y * src->linesize[0] + crop_x;
+		crop_data[1] = src->data[1] + (size_t)(crop_y / 2) * src->linesize[1] + (crop_x / 2);
+		crop_data[2] = src->data[2] + (size_t)(crop_y / 2) * src->linesize[2] + (crop_x / 2);
+		return true;
+
+	case VIDEO_FORMAT_I444:
+		crop_data[0] = src->data[0] + (size_t)crop_y * src->linesize[0] + crop_x;
+		crop_data[1] = src->data[1] + (size_t)crop_y * src->linesize[1] + crop_x;
+		crop_data[2] = src->data[2] + (size_t)crop_y * src->linesize[2] + crop_x;
+		return true;
+
+	case VIDEO_FORMAT_YUY2:
+	case VIDEO_FORMAT_UYVY:
+	case VIDEO_FORMAT_YVYU:
+		crop_data[0] = src->data[0] + (size_t)crop_y * src->linesize[0] + (size_t)crop_x * 2;
+		return true;
+
+	case VIDEO_FORMAT_RGBA:
+	case VIDEO_FORMAT_BGRA:
+	case VIDEO_FORMAT_BGRX:
+	case VIDEO_FORMAT_AYUV:
+		crop_data[0] = src->data[0] + (size_t)crop_y * src->linesize[0] + (size_t)crop_x * 4;
+		return true;
+
+	case VIDEO_FORMAT_I422:
+		crop_data[0] = src->data[0] + (size_t)crop_y * src->linesize[0] + crop_x;
+		crop_data[1] = src->data[1] + (size_t)crop_y * src->linesize[1] + (crop_x / 2);
+		crop_data[2] = src->data[2] + (size_t)crop_y * src->linesize[2] + (crop_x / 2);
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+static struct obs_source_frame *replay_get_zoomed_frame(struct replay_source *context, struct obs_source_frame *src)
+{
+	if (!src || context->zoom_percent <= 100.5f)
+		return src;
+
+	float scale = context->zoom_percent / 100.0f;
+	uint32_t crop_w = (uint32_t)((float)src->width / scale);
+	uint32_t crop_h = (uint32_t)((float)src->height / scale);
+
+	crop_w = (crop_w >> 1) << 1;
+	crop_h = (crop_h >> 1) << 1;
+	if (crop_w < 32) crop_w = 32;
+	if (crop_h < 32) crop_h = 32;
+	if (crop_w >= src->width && crop_h >= src->height)
+		return src;
+
+	uint32_t crop_x = ((src->width - crop_w) / 2);
+	uint32_t crop_y = ((src->height - crop_h) / 2);
+	crop_x = (crop_x >> 1) << 1;
+	crop_y = (crop_y >> 1) << 1;
+
+	const uint8_t *crop_data[MAX_AV_PLANES];
+	if (!get_cropped_pointers(src, crop_x, crop_y, crop_data))
+		return src;
+
+	/* Allocate or re-allocate zoomed_frame if needed */
+	if (!context->zoomed_frame ||
+	    context->zoomed_frame->width != src->width ||
+	    context->zoomed_frame->height != src->height ||
+	    context->zoomed_frame->format != src->format) {
+		if (context->zoomed_frame) {
+			obs_source_frame_destroy(context->zoomed_frame);
+			context->zoomed_frame = NULL;
+		}
+		context->zoomed_frame = obs_source_frame_create(src->format, src->width, src->height);
+	}
+
+	/* Create or re-create scaler if crop dimensions or format changed */
+	if (!context->zoom_scaler ||
+	    context->zoom_scaler_crop_w != crop_w ||
+	    context->zoom_scaler_crop_h != crop_h ||
+	    context->zoom_scaler_format != src->format) {
+		if (context->zoom_scaler) {
+			video_scaler_destroy(context->zoom_scaler);
+			context->zoom_scaler = NULL;
+		}
+
+		struct video_scale_info ssi;
+		memset(&ssi, 0, sizeof(ssi));
+		ssi.format = src->format;
+		ssi.width = crop_w;
+		ssi.height = crop_h;
+		ssi.range = context->current_replay.ovi.range;
+		ssi.colorspace = context->current_replay.ovi.colorspace;
+
+		struct video_scale_info dsi;
+		memset(&dsi, 0, sizeof(dsi));
+		dsi.format = src->format;
+		dsi.width = src->width;
+		dsi.height = src->height;
+		dsi.range = context->current_replay.ovi.range;
+		dsi.colorspace = context->current_replay.ovi.colorspace;
+
+		int ret = video_scaler_create(&context->zoom_scaler, &dsi, &ssi, VIDEO_SCALE_DEFAULT);
+		if (ret != VIDEO_SCALER_SUCCESS) {
+			return src;
+		}
+		context->zoom_scaler_crop_w = crop_w;
+		context->zoom_scaler_crop_h = crop_h;
+		context->zoom_scaler_format = src->format;
+	}
+
+	if (!context->zoomed_frame || !context->zoom_scaler)
+		return src;
+
+	video_scaler_scale(context->zoom_scaler,
+			   context->zoomed_frame->data,
+			   context->zoomed_frame->linesize,
+			   crop_data,
+			   src->linesize);
+
+	context->zoomed_frame->timestamp = src->timestamp;
+	context->zoomed_frame->flip = src->flip;
+	context->zoomed_frame->flags = src->flags;
+	context->zoomed_frame->full_range = src->full_range;
+	for (size_t i = 0; i < 16; i++) {
+		context->zoomed_frame->color_matrix[i] = src->color_matrix[i];
+	}
+	for (size_t i = 0; i < 3; i++) {
+		context->zoomed_frame->color_range_min[i] = src->color_range_min[i];
+		context->zoomed_frame->color_range_max[i] = src->color_range_max[i];
+	}
+
+	return context->zoomed_frame;
+}
+
 static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c, const uint64_t os_timestamp)
 {
 	struct obs_source_frame *frame;
@@ -1345,7 +1491,8 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 			uint64_t t = frame->timestamp;
 			frame->timestamp = os_timestamp;
 			c->previous_frame_timestamp = frame->timestamp;
-			obs_source_output_video(c->source, frame);
+			struct obs_source_frame *out = replay_get_zoomed_frame(c, frame);
+			obs_source_output_video(c->source, out);
 			frame->timestamp = t;
 			return NULL;
 		}
@@ -1386,7 +1533,8 @@ static struct obs_source_frame *replay_restart_at_end(struct replay_source *c, c
 			uint64_t t = frame->timestamp;
 			frame->timestamp = os_timestamp;
 			c->previous_frame_timestamp = frame->timestamp;
-			obs_source_output_video(c->source, frame);
+			struct obs_source_frame *out = replay_get_zoomed_frame(c, frame);
+			obs_source_output_video(c->source, out);
 			frame->timestamp = t;
 			return NULL;
 		}
@@ -1643,6 +1791,45 @@ void update_speed(struct replay_source *context, float new_speed)
 	pthread_mutex_unlock(&context->video_mutex);
 
 	replay_update_text(context);
+	speed_popup_notify(context);
+}
+
+void update_zoom(struct replay_source *context, float new_zoom)
+{
+	if (new_zoom < SETTING_ZOOM_MIN)
+		new_zoom = SETTING_ZOOM_MIN;
+	if (new_zoom > SETTING_ZOOM_MAX)
+		new_zoom = SETTING_ZOOM_MAX;
+
+	if (fabsf(new_zoom - context->zoom_percent) < 0.1f)
+		return;
+
+	pthread_mutex_lock(&context->video_mutex);
+	context->zoom_percent = new_zoom;
+
+	/* If paused or stepped, immediately re-render current frame with new zoom */
+	if (!context->play && context->current_replay.video_frame_count) {
+		uint64_t pos = context->video_frame_position;
+		if (pos >= context->current_replay.video_frame_count)
+			pos = context->current_replay.video_frame_count - 1;
+		struct obs_source_frame *frame = context->current_replay.video_frames[pos];
+		if (frame) {
+			uint64_t os_timestamp = obs_get_video_frame_time();
+			uint64_t t = frame->timestamp;
+			frame->timestamp = os_timestamp;
+			struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+			obs_source_output_video(context->source, out);
+			frame->timestamp = t;
+		}
+	}
+	pthread_mutex_unlock(&context->video_mutex);
+
+	obs_data_t *settings = obs_source_get_settings(context->source);
+	if (settings) {
+		obs_data_set_double(settings, SETTING_ZOOM, (double)new_zoom);
+		obs_data_release(settings);
+	}
+
 	speed_popup_notify(context);
 }
 
@@ -2073,6 +2260,11 @@ static void replay_source_update(void *data, obs_data_t *settings)
 		new_speed = 60.0f;
 	update_speed(context, new_speed);
 
+	float new_zoom = (float)obs_data_get_double(settings, SETTING_ZOOM);
+	if (new_zoom < SETTING_ZOOM_MIN || new_zoom > SETTING_ZOOM_MAX)
+		new_zoom = 100.0f;
+	update_zoom(context, new_zoom);
+
 	context->backward_start = obs_data_get_bool(settings, SETTING_BACKWARD);
 	if (context->backward != context->backward_start) {
 		replay_reverse_hotkey(context, 0, NULL, true);
@@ -2216,6 +2408,7 @@ static void *replay_source_create(obs_data_t *settings, obs_source_t *source)
 	UNUSED_PARAMETER(settings);
 	struct replay_source *context = bzalloc(sizeof(struct replay_source));
 	context->source = source;
+	context->zoom_percent = 100.0f;
 	obs_source_set_async_unbuffered(source, true);
 	pthread_mutex_init(&context->video_mutex, NULL);
 	pthread_mutex_init(&context->audio_mutex, NULL);
@@ -2418,6 +2611,14 @@ static void replay_source_destroy(void *data)
 		video_scaler_destroy(context->scaler);
 		context->scaler = NULL;
 	}
+	if (context->zoom_scaler) {
+		video_scaler_destroy(context->zoom_scaler);
+		context->zoom_scaler = NULL;
+	}
+	if (context->zoomed_frame) {
+		obs_source_frame_destroy(context->zoomed_frame);
+		context->zoomed_frame = NULL;
+	}
 
 	pthread_mutex_destroy(&context->video_mutex);
 	pthread_mutex_destroy(&context->audio_mutex);
@@ -2443,7 +2644,8 @@ static void replay_output_frame(struct replay_source *context, struct obs_source
 	frame->timestamp += context->start_timestamp;
 	if (context->previous_frame_timestamp <= frame->timestamp) {
 		context->previous_frame_timestamp = frame->timestamp;
-		obs_source_output_video(context->source, frame);
+		struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+		obs_source_output_video(context->source, out);
 	}
 	frame->timestamp = t;
 	replay_update_progress_crop(context, t);
@@ -2688,7 +2890,8 @@ static void replay_source_tick(void *data, float seconds)
 			frame = context->current_replay.video_frames[context->video_frame_position];
 			t = frame->timestamp;
 			frame->timestamp = os_timestamp;
-			obs_source_output_video(context->source, frame);
+			struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+			obs_source_output_video(context->source, out);
 			frame->timestamp = t;
 			replay_update_text(context);
 		}
@@ -3094,6 +3297,8 @@ static obs_properties_t *replay_source_properties(void *data)
 
 	obs_properties_add_float_slider(props, SETTING_SPEED, obs_module_text("SpeedPercentage"), SETTING_SPEED_MIN,
 					SETTING_SPEED_MAX, 1.0);
+	obs_properties_add_float_slider(props, SETTING_ZOOM, obs_module_text("ZoomPercentage"), SETTING_ZOOM_MIN,
+					SETTING_ZOOM_MAX, 5.0);
 	obs_properties_add_bool(props, SETTING_SPEED_POPUP_ALWAYS_SHOW, obs_module_text("SpeedPopupAlwaysShow"));
 	obs_properties_add_bool(props, SETTING_BACKWARD, obs_module_text("Backwards"));
 

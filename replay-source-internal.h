@@ -162,6 +162,13 @@ struct replay_source {
 	bool filter_loaded;
 	bool free_after_save;
 	void *speed_popup;
+
+	float zoom_percent;
+	video_scaler_t *zoom_scaler;
+	uint32_t zoom_scaler_crop_w;
+	uint32_t zoom_scaler_crop_h;
+	enum video_format zoom_scaler_format;
+	struct obs_source_frame *zoomed_frame;
 };
 
 /* ------------------------------------------------------------------ */
@@ -179,3 +186,6 @@ void replay_set_backward(struct replay_source *context);
 
 /* Toggle play / pause state. */
 void replay_toggle_play_pause(struct replay_source *context);
+
+/* Update zoom percentage (100.0f = 1.0x up to 300.0f = 3.0x). */
+void update_zoom(struct replay_source *context, float new_zoom);
