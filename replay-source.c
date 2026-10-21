@@ -410,6 +410,7 @@ static void replay_update_position(struct replay_source *context, bool lock)
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
+	replay_reset_zoom(context);
 	replay_update_text(context);
 	context->start_timestamp = obs_get_video_frame_time();
 	context->backward = context->backward_start;
@@ -589,6 +590,7 @@ void replay_restart(void *data)
 	struct replay_source *c = data;
 	c->restart = true;
 	c->play = true;
+	replay_reset_zoom(c);
 	obs_source_signal(c->source, "media_restart");
 	speed_popup_show(c);
 }
@@ -1126,6 +1128,7 @@ static void replay_retrieve(struct replay_source *context)
 		obs_data_set_double(settings_ret, SETTING_SPEED, 60.0);
 		obs_data_release(settings_ret);
 	}
+	replay_reset_zoom(context);
 	replay_update_text(context);
 
 	blog(LOG_INFO, "[replay_source: '%s'] replay added of %.2f seconds", obs_source_get_name(context->source),
@@ -1482,6 +1485,7 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
+	replay_reset_zoom(c);
 	replay_update_text(c);
 	c->restart = false;
 	c->start_timestamp = os_timestamp;
@@ -1524,6 +1528,7 @@ static struct obs_source_frame *replay_restart_at_end(struct replay_source *c, c
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
+	replay_reset_zoom(c);
 	replay_update_text(c);
 	frame = c->current_replay.video_frames[c->video_frame_position];
 	duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp - (int64_t)c->current_replay.first_frame_timestamp) *
@@ -1839,6 +1844,26 @@ void update_zoom(struct replay_source *context, float new_zoom)
 	}
 
 	speed_popup_notify(context);
+}
+
+void replay_reset_zoom(struct replay_source *context)
+{
+	pthread_mutex_lock(&context->video_mutex);
+	bool was_zoomed = (context->zoom_percent > 100.05f);
+	context->zoom_percent = 100.0f;
+	pthread_mutex_unlock(&context->video_mutex);
+
+	obs_data_t *settings = obs_source_get_settings(context->source);
+	if (settings) {
+		if (obs_data_get_double(settings, SETTING_ZOOM) > 100.05) {
+			obs_data_set_double(settings, SETTING_ZOOM, 100.0);
+			was_zoomed = true;
+		}
+		obs_data_release(settings);
+	}
+
+	if (was_zoomed)
+		speed_popup_notify(context);
 }
 
 static void replay_faster_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)

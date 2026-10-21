@@ -189,3 +189,7 @@ void replay_toggle_play_pause(struct replay_source *context);
 
 /* Update zoom percentage (100.0f = 1.0x up to 300.0f = 3.0x). */
 void update_zoom(struct replay_source *context, float new_zoom);
+
+/* Reset zoom back to 100% (1.0x - normal). */
+void replay_reset_zoom(struct replay_source *context);
+
