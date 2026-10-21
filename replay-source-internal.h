@@ -197,4 +197,8 @@ void update_zoom(struct replay_source *context, float new_zoom);
 /* Reset zoom back to 100% (1.0x - normal). */
 void replay_reset_zoom(struct replay_source *context);
 
+/* Obtain zoomed frame if zoom > 100%, else returns src. */
+struct obs_source_frame *replay_get_zoomed_frame(struct replay_source *context, struct obs_source_frame *src);
+
+
 

@@ -1368,7 +1368,7 @@ static bool get_cropped_pointers(const struct obs_source_frame *src, uint32_t cr
 	}
 }
 
-static struct obs_source_frame *replay_get_zoomed_frame(struct replay_source *context, struct obs_source_frame *src)
+struct obs_source_frame *replay_get_zoomed_frame(struct replay_source *context, struct obs_source_frame *src)
 {
 	if (!src || context->zoom_percent <= 100.5f)
 		return src;
