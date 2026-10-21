@@ -525,6 +525,7 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, SETTING_FRAME_STEP_COUNT, 5);
 	obs_data_set_default_int(settings, SETTING_END_ACTION, END_ACTION_LOOP);
 	obs_data_set_default_bool(settings, SETTING_BACKWARD, false);
+	obs_data_set_default_bool(settings, SETTING_SPEED_POPUP_ALWAYS_SHOW, false);
 	obs_data_set_default_string(settings, SETTING_FILE_FORMAT, "%CCYY-%MM-%DD %hh.%mm.%ss");
 	obs_data_set_default_bool(settings, SETTING_LOSSLESS, false);
 }
@@ -2076,6 +2077,13 @@ static void replay_source_update(void *data, obs_data_t *settings)
 	if (context->backward != context->backward_start) {
 		replay_reverse_hotkey(context, 0, NULL, true);
 	}
+	bool prev_always_show = context->speed_popup_always_show;
+	context->speed_popup_always_show = obs_data_get_bool(settings, SETTING_SPEED_POPUP_ALWAYS_SHOW);
+	if (context->speed_popup_always_show) {
+		speed_popup_show(context);
+	} else if (prev_always_show && !context->active) {
+		speed_popup_hide(context);
+	}
 	context->sound_trigger = obs_data_get_bool(settings, SETTING_SOUND_TRIGGER);
 	if (!context->disabled) {
 
@@ -3086,6 +3094,7 @@ static obs_properties_t *replay_source_properties(void *data)
 
 	obs_properties_add_float_slider(props, SETTING_SPEED, obs_module_text("SpeedPercentage"), SETTING_SPEED_MIN,
 					SETTING_SPEED_MAX, 1.0);
+	obs_properties_add_bool(props, SETTING_SPEED_POPUP_ALWAYS_SHOW, obs_module_text("SpeedPopupAlwaysShow"));
 	obs_properties_add_bool(props, SETTING_BACKWARD, obs_module_text("Backwards"));
 
 	obs_properties_add_path(props, SETTING_DIRECTORY, obs_module_text("Directory"), OBS_PATH_DIRECTORY, NULL, NULL);

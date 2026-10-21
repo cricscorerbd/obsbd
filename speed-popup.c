@@ -119,7 +119,7 @@ static void popup_refresh_play_pause_button(struct speed_popup *p)
 	if (!p || !p->hwnd_play_pause || !p->context)
 		return;
 	bool is_playing = p->context->play && !p->context->end;
-	SetWindowTextW(p->hwnd_play_pause, is_playing ? L"\u23F8  Pause" : L"\u25BA  Play");
+	SetWindowTextW(p->hwnd_play_pause, is_playing ? L"||  Pause" : L"\u25BA  Play");
 }
 
 static void popup_layout(struct speed_popup *p, HWND hwnd)
@@ -535,6 +535,9 @@ void speed_popup_show(struct replay_source *context)
 
 void speed_popup_hide(struct replay_source *context)
 {
+	if (!context) return;
+	if (context->speed_popup_always_show)
+		return;
 	struct speed_popup *p = (struct speed_popup *)context->speed_popup;
 	if (p && p->hwnd)
 		PostMessageA(p->hwnd, WM_USER_HIDE_POPUP, 0, 0);

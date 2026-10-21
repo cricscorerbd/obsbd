@@ -133,6 +133,7 @@ struct replay_source {
 
 	uint64_t video_frame_position;
 	uint64_t video_save_position;
+	bool speed_popup_always_show;
 
 	uint64_t audio_frame_position;
 	struct obs_audio_data audio_output;
