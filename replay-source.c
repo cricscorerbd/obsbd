@@ -525,6 +525,7 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, SETTING_FRAME_STEP_COUNT, 5);
 	obs_data_set_default_int(settings, SETTING_END_ACTION, END_ACTION_LOOP);
 	obs_data_set_default_bool(settings, SETTING_BACKWARD, false);
+	obs_data_set_default_bool(settings, SETTING_OPTICAL_FLOW, false);
 	obs_data_set_default_string(settings, SETTING_FILE_FORMAT, "%CCYY-%MM-%DD %hh.%mm.%ss");
 	obs_data_set_default_bool(settings, SETTING_LOSSLESS, false);
 }
@@ -2076,6 +2077,7 @@ static void replay_source_update(void *data, obs_data_t *settings)
 	if (context->backward != context->backward_start) {
 		replay_reverse_hotkey(context, 0, NULL, true);
 	}
+	context->optical_flow = obs_data_get_bool(settings, SETTING_OPTICAL_FLOW);
 	context->sound_trigger = obs_data_get_bool(settings, SETTING_SOUND_TRIGGER);
 	if (!context->disabled) {
 
@@ -2414,8 +2416,326 @@ static void replay_source_destroy(void *data)
 	pthread_mutex_destroy(&context->video_mutex);
 	pthread_mutex_destroy(&context->audio_mutex);
 	pthread_mutex_destroy(&context->replay_mutex);
+	if (context->interpolated_frame) {
+		obs_source_frame_destroy(context->interpolated_frame);
+		context->interpolated_frame = NULL;
+	}
+	if (context->motion_vectors) {
+		bfree(context->motion_vectors);
+		context->motion_vectors = NULL;
+		context->motion_vectors_size = 0;
+	}
 	speed_popup_destroy(context);
 	bfree(context);
+}
+
+struct motion_vector {
+	int8_t vx;
+	int8_t vy;
+};
+
+#define OF_BLOCK_SIZE 16
+#define OF_SEARCH_RANGE 12
+
+static inline int of_compute_block_sad(const uint8_t *srcA, uint32_t strideA,
+				       const uint8_t *srcB, uint32_t strideB,
+				       int x, int y, int vx, int vy, int bw, int bh)
+{
+	int sad = 0;
+	int sx = x + vx;
+	int sy = y + vy;
+	for (int r = 0; r < bh; r += 2) {
+		const uint8_t *pA = srcA + (y + r) * strideA + x;
+		const uint8_t *pB = srcB + (sy + r) * strideB + sx;
+		for (int c = 0; c < bw; c += 2) {
+			int diff = (int)pA[c] - (int)pB[c];
+			sad += (diff < 0) ? -diff : diff;
+		}
+	}
+	return sad;
+}
+
+static struct obs_source_frame *optical_flow_interpolate(struct replay_source *context,
+							 struct obs_source_frame *frameA,
+							 struct obs_source_frame *frameB,
+							 float alpha)
+{
+	if (!frameA || !frameB)
+		return frameA ? frameA : frameB;
+	if (alpha <= 0.05f)
+		return frameA;
+	if (alpha >= 0.95f)
+		return frameB;
+	if (frameA->format != frameB->format || frameA->width != frameB->width || frameA->height != frameB->height)
+		return frameA;
+
+	uint32_t width = frameA->width;
+	uint32_t height = frameA->height;
+	enum video_format fmt = frameA->format;
+
+	if (!context->interpolated_frame ||
+	    context->interpolated_frame->format != fmt ||
+	    context->interpolated_frame->width != width ||
+	    context->interpolated_frame->height != height) {
+		if (context->interpolated_frame) {
+			obs_source_frame_destroy(context->interpolated_frame);
+			context->interpolated_frame = NULL;
+		}
+		context->interpolated_frame = obs_source_frame_create(fmt, width, height);
+		if (!context->interpolated_frame)
+			return frameA;
+	}
+
+	struct obs_source_frame *dst = context->interpolated_frame;
+	dst->format = fmt;
+	dst->width = width;
+	dst->height = height;
+	dst->timestamp = frameA->timestamp;
+	dst->full_range = frameA->full_range;
+	dst->flip = frameA->flip;
+	dst->flags = frameA->flags;
+	dst->trc = frameA->trc;
+	memcpy(dst->color_matrix, frameA->color_matrix, sizeof(dst->color_matrix));
+	memcpy(dst->color_range_min, frameA->color_range_min, sizeof(dst->color_range_min));
+	memcpy(dst->color_range_max, frameA->color_range_max, sizeof(dst->color_range_max));
+
+	uint32_t blocks_x = (width + OF_BLOCK_SIZE - 1) / OF_BLOCK_SIZE;
+	uint32_t blocks_y = (height + OF_BLOCK_SIZE - 1) / OF_BLOCK_SIZE;
+	size_t num_blocks = (size_t)blocks_x * blocks_y;
+	size_t req_mem = num_blocks * sizeof(struct motion_vector);
+
+	if (context->motion_vectors_size < req_mem) {
+		bfree(context->motion_vectors);
+		context->motion_vectors = bzalloc(req_mem);
+		context->motion_vectors_size = req_mem;
+	}
+	if (!context->motion_vectors)
+		return frameA;
+
+	struct motion_vector *mvs = (struct motion_vector *)context->motion_vectors;
+
+	const uint8_t *yA = frameA->data[0];
+	const uint8_t *yB = frameB->data[0];
+	uint32_t strideA = frameA->linesize[0];
+	uint32_t strideB = frameB->linesize[0];
+	uint32_t dst_strideY = dst->linesize[0];
+	uint8_t *dstY = dst->data[0];
+
+	if (!yA || !yB || !dstY)
+		return frameA;
+
+	uint32_t weight = (uint32_t)(alpha * 256.0f);
+	if (weight > 256)
+		weight = 256;
+	uint32_t inv_weight = 256 - weight;
+
+	for (uint32_t by = 0; by < blocks_y; by++) {
+		int y = (int)(by * OF_BLOCK_SIZE);
+		int bh = ((int)height - y < OF_BLOCK_SIZE) ? ((int)height - y) : OF_BLOCK_SIZE;
+
+		for (uint32_t bx = 0; bx < blocks_x; bx++) {
+			int x = (int)(bx * OF_BLOCK_SIZE);
+			int bw = ((int)width - x < OF_BLOCK_SIZE) ? ((int)width - x) : OF_BLOCK_SIZE;
+			size_t blk_idx = by * blocks_x + bx;
+
+			int best_sad = of_compute_block_sad(yA, strideA, yB, strideB, x, y, 0, 0, bw, bh);
+			int best_vx = 0;
+			int best_vy = 0;
+
+			int threshold = (bw * bh) / 6;
+			if (best_sad > threshold) {
+				for (int vy = -OF_SEARCH_RANGE; vy <= OF_SEARCH_RANGE; vy += 3) {
+					if (y + vy < 0 || y + vy + bh > (int)height)
+						continue;
+					for (int vx = -OF_SEARCH_RANGE; vx <= OF_SEARCH_RANGE; vx += 3) {
+						if (x + vx < 0 || x + vx + bw > (int)width)
+							continue;
+						int sad = of_compute_block_sad(yA, strideA, yB, strideB, x, y, vx, vy, bw, bh);
+						if (sad < best_sad) {
+							best_sad = sad;
+							best_vx = vx;
+							best_vy = vy;
+						}
+					}
+				}
+				int center_vx = best_vx;
+				int center_vy = best_vy;
+				for (int vy = center_vy - 1; vy <= center_vy + 1; vy++) {
+					if (y + vy < 0 || y + vy + bh > (int)height)
+						continue;
+					for (int vx = center_vx - 1; vx <= center_vx + 1; vx++) {
+						if (x + vx < 0 || x + vx + bw > (int)width)
+							continue;
+						int sad = of_compute_block_sad(yA, strideA, yB, strideB, x, y, vx, vy, bw, bh);
+						if (sad < best_sad) {
+							best_sad = sad;
+							best_vx = vx;
+							best_vy = vy;
+						}
+					}
+				}
+			}
+
+			mvs[blk_idx].vx = (int8_t)best_vx;
+			mvs[blk_idx].vy = (int8_t)best_vy;
+
+			int shift_xA = (int)(alpha * best_vx);
+			int shift_yA = (int)(alpha * best_vy);
+			int shift_xB = (int)(-(1.0f - alpha) * best_vx);
+			int shift_yB = (int)(-(1.0f - alpha) * best_vy);
+
+			for (int r = 0; r < bh; r++) {
+				int py = y + r;
+				int syA = py - shift_yA;
+				int syB = py - shift_yB;
+				if (syA < 0) syA = 0;
+				else if (syA >= (int)height) syA = (int)height - 1;
+				if (syB < 0) syB = 0;
+				else if (syB >= (int)height) syB = (int)height - 1;
+
+				const uint8_t *rowA = yA + syA * strideA;
+				const uint8_t *rowB = yB + syB * strideB;
+				uint8_t *rowDst = dstY + py * dst_strideY;
+
+				for (int c = 0; c < bw; c++) {
+					int px = x + c;
+					int sxA = px - shift_xA;
+					int sxB = px - shift_xB;
+					if (sxA < 0) sxA = 0;
+					else if (sxA >= (int)width) sxA = (int)width - 1;
+					if (sxB < 0) sxB = 0;
+					else if (sxB >= (int)width) sxB = (int)width - 1;
+
+					uint32_t valA = rowA[sxA];
+					uint32_t valB = rowB[sxB];
+					rowDst[px] = (uint8_t)((inv_weight * valA + weight * valB + 128) >> 8);
+				}
+			}
+		}
+	}
+
+	if (fmt == VIDEO_FORMAT_NV12 && frameA->data[1] && frameB->data[1] && dst->data[1]) {
+		const uint8_t *uvA = frameA->data[1];
+		const uint8_t *uvB = frameB->data[1];
+		uint8_t *dstUV = dst->data[1];
+		uint32_t strideUVA = frameA->linesize[1];
+		uint32_t strideUVB = frameB->linesize[1];
+		uint32_t dst_strideUV = dst->linesize[1];
+		uint32_t uv_height = (height + 1) / 2;
+
+		for (uint32_t by = 0; by < blocks_y; by++) {
+			int y = (int)(by * OF_BLOCK_SIZE);
+			int bh = ((int)height - y < OF_BLOCK_SIZE) ? ((int)height - y) : OF_BLOCK_SIZE;
+			int uv_y = y / 2;
+			int uv_bh = (bh + 1) / 2;
+
+			for (uint32_t bx = 0; bx < blocks_x; bx++) {
+				int x = (int)(bx * OF_BLOCK_SIZE);
+				int bw = ((int)width - x < OF_BLOCK_SIZE) ? ((int)width - x) : OF_BLOCK_SIZE;
+				size_t blk_idx = by * blocks_x + bx;
+
+				int vx = mvs[blk_idx].vx;
+				int vy = mvs[blk_idx].vy;
+
+				int shift_xA = (int)(alpha * vx);
+				int shift_yA = (int)(alpha * vy) / 2;
+				int shift_xB = (int)(-(1.0f - alpha) * vx);
+				int shift_yB = (int)(-(1.0f - alpha) * vy) / 2;
+
+				shift_xA &= ~1;
+				shift_xB &= ~1;
+
+				for (int r = 0; r < uv_bh; r++) {
+					int py = uv_y + r;
+					if (py >= (int)uv_height) break;
+					int syA = py - shift_yA;
+					int syB = py - shift_yB;
+					if (syA < 0) syA = 0;
+					else if (syA >= (int)uv_height) syA = (int)uv_height - 1;
+					if (syB < 0) syB = 0;
+					else if (syB >= (int)uv_height) syB = (int)uv_height - 1;
+
+					const uint8_t *rowA = uvA + syA * strideUVA;
+					const uint8_t *rowB = uvB + syB * strideUVB;
+					uint8_t *rowDst = dstUV + py * dst_strideUV;
+
+					for (int c = 0; c < bw; c += 2) {
+						int px = x + c;
+						int sxA = px - shift_xA;
+						int sxB = px - shift_xB;
+						if (sxA < 0) sxA = 0;
+						else if (sxA + 1 >= (int)width) sxA = ((int)width - 2) & ~1;
+						if (sxB < 0) sxB = 0;
+						else if (sxB + 1 >= (int)width) sxB = ((int)width - 2) & ~1;
+
+						rowDst[px] = (uint8_t)((inv_weight * rowA[sxA] + weight * rowB[sxB] + 128) >> 8);
+						rowDst[px + 1] = (uint8_t)((inv_weight * rowA[sxA + 1] + weight * rowB[sxB + 1] + 128) >> 8);
+					}
+				}
+			}
+		}
+	} else if (fmt == VIDEO_FORMAT_I420 && frameA->data[1] && frameA->data[2] && dst->data[1] && dst->data[2]) {
+		uint32_t uv_w = (width + 1) / 2;
+		uint32_t uv_h = (height + 1) / 2;
+		for (int p = 1; p <= 2; p++) {
+			const uint8_t *srcA = frameA->data[p];
+			const uint8_t *srcB = frameB->data[p];
+			uint8_t *pDst = dst->data[p];
+			uint32_t sA = frameA->linesize[p];
+			uint32_t sB = frameB->linesize[p];
+			uint32_t sDst = dst->linesize[p];
+
+			for (uint32_t by = 0; by < blocks_y; by++) {
+				int y = (int)(by * OF_BLOCK_SIZE);
+				int bh = ((int)height - y < OF_BLOCK_SIZE) ? ((int)height - y) : OF_BLOCK_SIZE;
+				int uv_y = y / 2;
+				int uv_bh = (bh + 1) / 2;
+
+				for (uint32_t bx = 0; bx < blocks_x; bx++) {
+					int x = (int)(bx * OF_BLOCK_SIZE);
+					int bw = ((int)width - x < OF_BLOCK_SIZE) ? ((int)width - x) : OF_BLOCK_SIZE;
+					int uv_x = x / 2;
+					int uv_bw = (bw + 1) / 2;
+					size_t blk_idx = by * blocks_x + bx;
+
+					int shift_xA = (int)(alpha * mvs[blk_idx].vx) / 2;
+					int shift_yA = (int)(alpha * mvs[blk_idx].vy) / 2;
+					int shift_xB = (int)(-(1.0f - alpha) * mvs[blk_idx].vx) / 2;
+					int shift_yB = (int)(-(1.0f - alpha) * mvs[blk_idx].vy) / 2;
+
+					for (int r = 0; r < uv_bh; r++) {
+						int py = uv_y + r;
+						if (py >= (int)uv_h) break;
+						int syA = py - shift_yA;
+						int syB = py - shift_yB;
+						if (syA < 0) syA = 0;
+						else if (syA >= (int)uv_h) syA = (int)uv_h - 1;
+						if (syB < 0) syB = 0;
+						else if (syB >= (int)uv_h) syB = (int)uv_h - 1;
+
+						const uint8_t *rowA = srcA + syA * sA;
+						const uint8_t *rowB = srcB + syB * sB;
+						uint8_t *rowDst = pDst + py * sDst;
+
+						for (int c = 0; c < uv_bw; c++) {
+							int px = uv_x + c;
+							if (px >= (int)uv_w) break;
+							int sxA = px - shift_xA;
+							int sxB = px - shift_xB;
+							if (sxA < 0) sxA = 0;
+							else if (sxA >= (int)uv_w) sxA = (int)uv_w - 1;
+							if (sxB < 0) sxB = 0;
+							else if (sxB >= (int)uv_w) sxB = (int)uv_w - 1;
+
+							rowDst[px] = (uint8_t)((inv_weight * rowA[sxA] + weight * rowB[sxB] + 128) >> 8);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return dst;
 }
 
 static void replay_output_frame(struct replay_source *context, struct obs_source_frame *frame)
@@ -2423,6 +2743,18 @@ static void replay_output_frame(struct replay_source *context, struct obs_source
 	uint64_t t = frame->timestamp;
 	if (t < context->current_replay.first_frame_timestamp || t > context->current_replay.last_frame_timestamp)
 		return;
+
+	if (frame == context->interpolated_frame) {
+		const uint64_t os_ts = obs_get_video_frame_time();
+		if (context->previous_frame_timestamp < os_ts) {
+			frame->timestamp = os_ts;
+			context->previous_frame_timestamp = os_ts;
+			obs_source_output_video(context->source, frame);
+			frame->timestamp = t;
+		}
+		replay_update_progress_crop(context, t);
+		return;
+	}
 
 	if (context->backward) {
 		frame->timestamp = context->current_replay.last_frame_timestamp - frame->timestamp;
@@ -2734,7 +3066,24 @@ static void replay_source_tick(void *data, float seconds)
 			}
 
 			frame = context->current_replay.video_frames[context->video_frame_position];
-			replay_output_frame(context, frame);
+			struct obs_source_frame *out_frame = frame;
+
+			if (context->play && context->optical_flow && context->speed_percent < 100.0f &&
+			    context->video_frame_position > 0) {
+				prev_f = context->current_replay.video_frames[context->video_frame_position - 1];
+				int64_t cur_dur = (int64_t)((context->current_replay.last_frame_timestamp - frame->timestamp) *
+							    100.0 / context->speed_percent);
+				int64_t n_dur = (int64_t)((context->current_replay.last_frame_timestamp - prev_f->timestamp) *
+							  100.0 / context->speed_percent);
+				if (n_dur > cur_dur) {
+					float alpha = (float)(video_duration - cur_dur) / (float)(n_dur - cur_dur);
+					if (alpha > 0.05f && alpha < 0.95f) {
+						out_frame = optical_flow_interpolate(context, frame, prev_f, alpha);
+					}
+				}
+			}
+
+			replay_output_frame(context, out_frame);
 			if (context->video_frame_position == 0) {
 				replay_source_end_action(context);
 			}
@@ -2838,7 +3187,24 @@ static void replay_source_tick(void *data, float seconds)
 			}
 
 			frame = context->current_replay.video_frames[context->video_frame_position];
-			replay_output_frame(context, frame);
+			struct obs_source_frame *out_frame = frame;
+
+			if (context->play && context->optical_flow && context->speed_percent < 100.0f &&
+			    context->video_frame_position + 1 < frame_count) {
+				next_f = context->current_replay.video_frames[context->video_frame_position + 1];
+				int64_t cur_dur = (int64_t)((frame->timestamp - context->current_replay.first_frame_timestamp) *
+							    100.0 / context->speed_percent);
+				int64_t n_dur = (int64_t)((next_f->timestamp - context->current_replay.first_frame_timestamp) *
+							  100.0 / context->speed_percent);
+				if (n_dur > cur_dur) {
+					float alpha = (float)(video_duration - cur_dur) / (float)(n_dur - cur_dur);
+					if (alpha > 0.05f && alpha < 0.95f) {
+						out_frame = optical_flow_interpolate(context, frame, next_f, alpha);
+					}
+				}
+			}
+
+			replay_output_frame(context, out_frame);
 			if (context->video_frame_position >= frame_count - 1) {
 				context->video_frame_position = frame_count - 1;
 				replay_source_end_action(context);
@@ -3086,6 +3452,7 @@ static obs_properties_t *replay_source_properties(void *data)
 
 	obs_properties_add_float_slider(props, SETTING_SPEED, obs_module_text("SpeedPercentage"), SETTING_SPEED_MIN,
 					SETTING_SPEED_MAX, 1.0);
+	obs_properties_add_bool(props, SETTING_OPTICAL_FLOW, obs_module_text("OpticalFlow"));
 	obs_properties_add_bool(props, SETTING_BACKWARD, obs_module_text("Backwards"));
 
 	obs_properties_add_path(props, SETTING_DIRECTORY, obs_module_text("Directory"), OBS_PATH_DIRECTORY, NULL, NULL);
