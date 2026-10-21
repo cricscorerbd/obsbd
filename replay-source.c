@@ -525,7 +525,6 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, SETTING_FRAME_STEP_COUNT, 5);
 	obs_data_set_default_int(settings, SETTING_END_ACTION, END_ACTION_LOOP);
 	obs_data_set_default_bool(settings, SETTING_BACKWARD, false);
-	obs_data_set_default_bool(settings, SETTING_SMOOTH_SLOWMOTION, true);
 	obs_data_set_default_string(settings, SETTING_FILE_FORMAT, "%CCYY-%MM-%DD %hh.%mm.%ss");
 	obs_data_set_default_bool(settings, SETTING_LOSSLESS, false);
 }
@@ -2077,7 +2076,6 @@ static void replay_source_update(void *data, obs_data_t *settings)
 	if (context->backward != context->backward_start) {
 		replay_reverse_hotkey(context, 0, NULL, true);
 	}
-	context->smooth_slowmotion = obs_data_get_bool(settings, SETTING_SMOOTH_SLOWMOTION);
 	context->sound_trigger = obs_data_get_bool(settings, SETTING_SOUND_TRIGGER);
 	if (!context->disabled) {
 
@@ -2416,126 +2414,8 @@ static void replay_source_destroy(void *data)
 	pthread_mutex_destroy(&context->video_mutex);
 	pthread_mutex_destroy(&context->audio_mutex);
 	pthread_mutex_destroy(&context->replay_mutex);
-	if (context->blended_frame) {
-		obs_source_frame_destroy(context->blended_frame);
-		context->blended_frame = NULL;
-	}
 	speed_popup_destroy(context);
 	bfree(context);
-}
-
-static inline void blend_bytes(uint8_t *dst, const uint8_t *srcA, const uint8_t *srcB, size_t count, uint32_t weight)
-{
-	uint32_t inv_weight;
-	size_t i;
-
-	if (!dst || !srcA || !srcB || count == 0)
-		return;
-	if (weight == 0) {
-		memcpy(dst, srcA, count);
-		return;
-	}
-	if (weight >= 256) {
-		memcpy(dst, srcB, count);
-		return;
-	}
-
-	inv_weight = 256 - weight;
-	for (i = 0; i < count; i++) {
-		dst[i] = (uint8_t)((srcA[i] * inv_weight + srcB[i] * weight + 128) >> 8);
-	}
-}
-
-static inline size_t get_frame_plane_count(enum video_format format)
-{
-	switch (format) {
-	case VIDEO_FORMAT_I420:
-	case VIDEO_FORMAT_I422:
-	case VIDEO_FORMAT_I444:
-		return 3;
-	case VIDEO_FORMAT_NV12:
-		return 2;
-	case VIDEO_FORMAT_BGRA:
-	case VIDEO_FORMAT_BGRX:
-	case VIDEO_FORMAT_RGBA:
-	case VIDEO_FORMAT_YUY2:
-	case VIDEO_FORMAT_UYVY:
-	case VIDEO_FORMAT_Y800:
-	default:
-		return 1;
-	}
-}
-
-static inline uint32_t get_frame_plane_height(enum video_format format, size_t plane, uint32_t height)
-{
-	if (plane == 0)
-		return height;
-	if (format == VIDEO_FORMAT_NV12 || format == VIDEO_FORMAT_I420)
-		return (height + 1) / 2;
-	return height;
-}
-
-static struct obs_source_frame *blend_source_frames(struct replay_source *context,
-						    struct obs_source_frame *frameA,
-						    struct obs_source_frame *frameB,
-						    float alpha)
-{
-	struct obs_source_frame *dst;
-	size_t planes;
-	size_t p;
-	uint32_t weight;
-
-	if (!frameA)
-		return frameB;
-	if (!frameB)
-		return frameA;
-	if (alpha <= 0.02f)
-		return frameA;
-	if (alpha >= 0.98f)
-		return frameB;
-	if (frameA->format != frameB->format || frameA->width != frameB->width || frameA->height != frameB->height)
-		return frameA;
-
-	if (!context->blended_frame ||
-	    context->blended_frame->format != frameA->format ||
-	    context->blended_frame->width != frameA->width ||
-	    context->blended_frame->height != frameA->height) {
-		if (context->blended_frame) {
-			obs_source_frame_destroy(context->blended_frame);
-			context->blended_frame = NULL;
-		}
-		context->blended_frame = obs_source_frame_create(frameA->format, frameA->width, frameA->height);
-		if (!context->blended_frame)
-			return frameA;
-	}
-
-	dst = context->blended_frame;
-	dst->format = frameA->format;
-	dst->width = frameA->width;
-	dst->height = frameA->height;
-	dst->timestamp = frameA->timestamp;
-	dst->full_range = frameA->full_range;
-	dst->flip = frameA->flip;
-	dst->flags = frameA->flags;
-	dst->trc = frameA->trc;
-	memcpy(dst->color_matrix, frameA->color_matrix, sizeof(dst->color_matrix));
-	memcpy(dst->color_range_min, frameA->color_range_min, sizeof(dst->color_range_min));
-	memcpy(dst->color_range_max, frameA->color_range_max, sizeof(dst->color_range_max));
-
-	weight = (uint32_t)(alpha * 256.0f);
-	if (weight > 256)
-		weight = 256;
-
-	planes = get_frame_plane_count(frameA->format);
-	for (p = 0; p < planes; p++) {
-		uint32_t rows = get_frame_plane_height(frameA->format, p, frameA->height);
-		size_t bytes = (size_t)rows * frameA->linesize[p];
-		if (dst->data[p] && frameA->data[p] && frameB->data[p] && bytes > 0) {
-			blend_bytes(dst->data[p], frameA->data[p], frameB->data[p], bytes, weight);
-		}
-	}
-
-	return dst;
 }
 
 static void replay_output_frame(struct replay_source *context, struct obs_source_frame *frame)
@@ -2543,18 +2423,6 @@ static void replay_output_frame(struct replay_source *context, struct obs_source
 	uint64_t t = frame->timestamp;
 	if (t < context->current_replay.first_frame_timestamp || t > context->current_replay.last_frame_timestamp)
 		return;
-
-	if (frame == context->blended_frame) {
-		const uint64_t os_ts = obs_get_video_frame_time();
-		if (context->previous_frame_timestamp < os_ts) {
-			frame->timestamp = os_ts;
-			context->previous_frame_timestamp = os_ts;
-			obs_source_output_video(context->source, frame);
-			frame->timestamp = t;
-		}
-		replay_update_progress_crop(context, t);
-		return;
-	}
 
 	if (context->backward) {
 		frame->timestamp = context->current_replay.last_frame_timestamp - frame->timestamp;
@@ -2833,12 +2701,9 @@ static void replay_source_tick(void *data, float seconds)
 		}
 		frame = context->current_replay.video_frames[context->video_frame_position];
 		if (context->backward) {
-			struct obs_source_frame *output_frame;
 			struct obs_source_frame *prev_f;
 			int64_t video_duration;
-			int64_t cur_dur;
 			int64_t next_dur;
-			float alpha;
 
 			if (context->restart) {
 				frame = replay_restart_at_end(context, os_timestamp);
@@ -2869,24 +2734,7 @@ static void replay_source_tick(void *data, float seconds)
 			}
 
 			frame = context->current_replay.video_frames[context->video_frame_position];
-			output_frame = frame;
-
-			if (context->play && context->smooth_slowmotion && context->speed_percent < 100.0f &&
-			    context->video_frame_position > 0) {
-				prev_f = context->current_replay.video_frames[context->video_frame_position - 1];
-				cur_dur = (int64_t)((context->current_replay.last_frame_timestamp - frame->timestamp) *
-						    100.0 / context->speed_percent);
-				next_dur = (int64_t)((context->current_replay.last_frame_timestamp - prev_f->timestamp) *
-						     100.0 / context->speed_percent);
-				if (next_dur > cur_dur) {
-					alpha = (float)(video_duration - cur_dur) / (float)(next_dur - cur_dur);
-					if (alpha > 0.0f && alpha < 1.0f) {
-						output_frame = blend_source_frames(context, frame, prev_f, alpha);
-					}
-				}
-			}
-
-			replay_output_frame(context, output_frame);
+			replay_output_frame(context, frame);
 			if (context->video_frame_position == 0) {
 				replay_source_end_action(context);
 			}
@@ -2970,9 +2818,7 @@ static void replay_source_tick(void *data, float seconds)
 			}
 			const uint64_t frame_count = context->current_replay.video_frame_count;
 			struct obs_source_frame *next_f;
-			int64_t cur_dur;
 			int64_t next_dur;
-			float alpha;
 
 			while (context->play && context->video_frame_position + 1 < frame_count) {
 				next_f = context->current_replay.video_frames[context->video_frame_position + 1];
@@ -2992,24 +2838,7 @@ static void replay_source_tick(void *data, float seconds)
 			}
 
 			frame = context->current_replay.video_frames[context->video_frame_position];
-			output_frame = frame;
-
-			if (context->play && context->smooth_slowmotion && context->speed_percent < 100.0f &&
-			    context->video_frame_position + 1 < frame_count) {
-				next_f = context->current_replay.video_frames[context->video_frame_position + 1];
-				cur_dur = (int64_t)((frame->timestamp - context->current_replay.first_frame_timestamp) *
-						    100.0 / context->speed_percent);
-				next_dur = (int64_t)((next_f->timestamp - context->current_replay.first_frame_timestamp) *
-						     100.0 / context->speed_percent);
-				if (next_dur > cur_dur) {
-					alpha = (float)(video_duration - cur_dur) / (float)(next_dur - cur_dur);
-					if (alpha > 0.0f && alpha < 1.0f) {
-						output_frame = blend_source_frames(context, frame, next_f, alpha);
-					}
-				}
-			}
-
-			replay_output_frame(context, output_frame);
+			replay_output_frame(context, frame);
 			if (context->video_frame_position >= frame_count - 1) {
 				context->video_frame_position = frame_count - 1;
 				replay_source_end_action(context);
@@ -3257,7 +3086,6 @@ static obs_properties_t *replay_source_properties(void *data)
 
 	obs_properties_add_float_slider(props, SETTING_SPEED, obs_module_text("SpeedPercentage"), SETTING_SPEED_MIN,
 					SETTING_SPEED_MAX, 1.0);
-	obs_properties_add_bool(props, SETTING_SMOOTH_SLOWMOTION, obs_module_text("SmoothSlowmotion"));
 	obs_properties_add_bool(props, SETTING_BACKWARD, obs_module_text("Backwards"));
 
 	obs_properties_add_path(props, SETTING_DIRECTORY, obs_module_text("Directory"), OBS_PATH_DIRECTORY, NULL, NULL);
