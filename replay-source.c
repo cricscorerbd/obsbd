@@ -1412,21 +1412,29 @@ static struct obs_source_frame *replay_get_zoomed_frame(struct replay_source *co
 			context->zoom_scaler = NULL;
 		}
 
+		struct obs_video_info ovi;
+		enum video_range_type range = VIDEO_RANGE_DEFAULT;
+		enum video_colorspace cs = VIDEO_CS_DEFAULT;
+		if (obs_get_video_info(&ovi)) {
+			range = ovi.range;
+			cs = ovi.colorspace;
+		}
+
 		struct video_scale_info ssi;
 		memset(&ssi, 0, sizeof(ssi));
 		ssi.format = src->format;
 		ssi.width = crop_w;
 		ssi.height = crop_h;
-		ssi.range = context->current_replay.ovi.range;
-		ssi.colorspace = context->current_replay.ovi.colorspace;
+		ssi.range = range;
+		ssi.colorspace = cs;
 
 		struct video_scale_info dsi;
 		memset(&dsi, 0, sizeof(dsi));
 		dsi.format = src->format;
 		dsi.width = src->width;
 		dsi.height = src->height;
-		dsi.range = context->current_replay.ovi.range;
-		dsi.colorspace = context->current_replay.ovi.colorspace;
+		dsi.range = range;
+		dsi.colorspace = cs;
 
 		int ret = video_scaler_create(&context->zoom_scaler, &dsi, &ssi, VIDEO_SCALE_DEFAULT);
 		if (ret != VIDEO_SCALER_SUCCESS) {
