@@ -133,10 +133,6 @@ struct replay_source {
 
 	uint64_t video_frame_position;
 	uint64_t video_save_position;
-	bool optical_flow;
-	struct obs_source_frame *interpolated_frame;
-	void *motion_vectors;
-	size_t motion_vectors_size;
 
 	uint64_t audio_frame_position;
 	struct obs_audio_data audio_output;
