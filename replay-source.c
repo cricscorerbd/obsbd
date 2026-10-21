@@ -410,7 +410,6 @@ static void replay_update_position(struct replay_source *context, bool lock)
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(context);
 	replay_update_text(context);
 	context->start_timestamp = obs_get_video_frame_time();
 	context->backward = context->backward_start;
@@ -590,7 +589,6 @@ void replay_restart(void *data)
 	struct replay_source *c = data;
 	c->restart = true;
 	c->play = true;
-	replay_reset_zoom(c);
 	obs_source_signal(c->source, "media_restart");
 	speed_popup_show(c);
 }
@@ -1485,7 +1483,6 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(c);
 	replay_update_text(c);
 	c->restart = false;
 	c->start_timestamp = os_timestamp;
@@ -1528,7 +1525,6 @@ static struct obs_source_frame *replay_restart_at_end(struct replay_source *c, c
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(c);
 	replay_update_text(c);
 	frame = c->current_replay.video_frames[c->video_frame_position];
 	duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp - (int64_t)c->current_replay.first_frame_timestamp) *
