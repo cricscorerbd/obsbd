@@ -177,3 +177,6 @@ void replay_set_forward(struct replay_source *context);
 
 /* Switch direction to backward (sets the backward flag correctly). */
 void replay_set_backward(struct replay_source *context);
+
+/* Toggle play / pause state. */
+void replay_toggle_play_pause(struct replay_source *context);

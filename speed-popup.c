@@ -49,6 +49,7 @@
 #define ID_BTN_60       2060
 #define ID_BTN_BACKWARD 2070
 #define ID_BTN_FORWARD  2071
+#define ID_BTN_PLAY_PAUSE 2072
 
 /* ------------------------------------------------------------------ */
 /*  Position persistence across show/hide and re-triggers             */
@@ -56,7 +57,7 @@
 static int  s_saved_x       = -1;
 static int  s_saved_y       = -1;
 static int  s_saved_w       = 450;
-static int  s_saved_h       = 240;
+static int  s_saved_h       = 285;
 static bool s_has_saved_pos = false;
 
 /* ------------------------------------------------------------------ */
@@ -76,6 +77,7 @@ struct speed_popup {
 	HWND   hwnd_b60;
 	HWND   hwnd_backward;
 	HWND   hwnd_forward;
+	HWND   hwnd_play_pause;
 	HFONT  hfont_title;
 	HFONT  hfont_btns;
 	HBRUSH hbr_bg;
@@ -112,6 +114,14 @@ static void popup_refresh_dir_buttons(struct speed_popup *p)
 	EnableWindow(p->hwnd_forward,  bwd ? TRUE  : FALSE);
 }
 
+static void popup_refresh_play_pause_button(struct speed_popup *p)
+{
+	if (!p || !p->hwnd_play_pause || !p->context)
+		return;
+	bool is_playing = p->context->play && !p->context->end;
+	SetWindowTextW(p->hwnd_play_pause, is_playing ? L"\u23F8  Pause" : L"\u25BA  Play");
+}
+
 static void popup_layout(struct speed_popup *p, HWND hwnd)
 {
 	if (!p || !p->hwnd_label)
@@ -133,12 +143,13 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 
 	int remaining_h = ch - (slider_y + slider_h) - pad;
 	int btn_gap = 8;
-	int btn_h = (remaining_h - btn_gap) / 2;
+	int btn_h = (remaining_h - btn_gap * 2) / 3;
 	if (btn_h < 26) btn_h = 26;
-	if (btn_h > 46) btn_h = 46;
+	if (btn_h > 44) btn_h = 44;
 
 	int spdbtn_y = slider_y + slider_h + btn_gap;
 	int dirbtn_y = spdbtn_y + btn_h + btn_gap;
+	int playbtn_y = dirbtn_y + btn_h + btn_gap;
 
 	MoveWindow(p->hwnd_label,  pad,     label_y,  cw - pad * 2,       label_h,  TRUE);
 	MoveWindow(p->hwnd_slider, pad - 2, slider_y, cw - (pad - 2) * 2, slider_h, TRUE);
@@ -159,6 +170,12 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 	int dh = (area - 6) / 2;
 	MoveWindow(p->hwnd_backward, pad,          dirbtn_y, dh, btn_h, TRUE);
 	MoveWindow(p->hwnd_forward,  pad + dh + 6, dirbtn_y, dh, btn_h, TRUE);
+
+	if (p->hwnd_play_pause) {
+		int play_w = dh;
+		int play_x = pad + (area - play_w) / 2;
+		MoveWindow(p->hwnd_play_pause, play_x, playbtn_y, play_w, btn_h, TRUE);
+	}
 
 	InvalidateRect(hwnd, NULL, TRUE);
 }
@@ -240,8 +257,15 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		SendMessageA(p->hwnd_backward, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 		SendMessageA(p->hwnd_forward,  WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 
+		/* Play / Pause toggle button (centered below Backward / Forward) */
+		p->hwnd_play_pause = CreateWindowExW(0, L"BUTTON", L"",
+			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_PLAY_PAUSE, NULL, NULL);
+		SendMessageA(p->hwnd_play_pause, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
+
 		popup_refresh_label(p);
 		popup_refresh_dir_buttons(p);
+		popup_refresh_play_pause_button(p);
 		return 0;
 	}
 
@@ -312,6 +336,10 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			popup_refresh_label(p);
 			popup_refresh_dir_buttons(p);
 			break;
+		case ID_BTN_PLAY_PAUSE:
+			replay_toggle_play_pause(p->context);
+			popup_refresh_play_pause_button(p);
+			break;
 		}
 		if (chg) {
 			if (spd < SETTING_SPEED_MIN) spd = SETTING_SPEED_MIN;
@@ -353,7 +381,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 	case WM_GETMINMAXINFO: {
 		MINMAXINFO *mmi = (MINMAXINFO *)lParam;
 		mmi->ptMinTrackSize.x = 360;
-		mmi->ptMinTrackSize.y = 190;
+		mmi->ptMinTrackSize.y = 230;
 		return 0;
 	}
 
@@ -375,7 +403,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 				}
 			} else {
 				sw = 450;
-				sh = 240;
+				sh = 285;
 				RECT rcWork;
 				SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
 				sx = rcWork.right  - sw - 24;
@@ -417,6 +445,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			SendMessageA(p->hwnd_slider, TBM_SETPOS, TRUE, pos);
 			popup_refresh_label(p);
 			popup_refresh_dir_buttons(p);
+			popup_refresh_play_pause_button(p);
 		}
 		return 0;
 	}
@@ -460,7 +489,7 @@ static DWORD WINAPI SpeedPopupThread(LPVOID param)
 		"OBSReplaySpeedMeterPopup",
 		"Replay Speed Meter",
 		WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 450, 240,
+		CW_USEDEFAULT, CW_USEDEFAULT, 450, 285,
 		NULL, NULL, GetModuleHandle(NULL), p);
 
 	if (!hwnd) {

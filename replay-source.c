@@ -645,6 +645,16 @@ static void replay_play_pause(void *data, bool pause)
 				c->start_timestamp += obs_get_video_frame_time() - c->pause_timestamp;
 				c->pause_timestamp = 0;
 			}
+			if (c->end || (c->video_frame_position == 0 && c->backward)) {
+				c->end = false;
+				if (c->backward) {
+					if (c->current_replay.video_frame_count)
+						c->video_frame_position = c->current_replay.video_frame_count - 1;
+				} else {
+					c->video_frame_position = 0;
+				}
+				c->start_timestamp = obs_get_video_frame_time();
+			}
 			obs_source_signal(c->source, "media_play");
 		}
 	} else {
@@ -666,6 +676,7 @@ static void replay_play_pause(void *data, bool pause)
 		}
 		obs_source_signal(c->source, "media_play");
 	}
+	speed_popup_notify(c);
 }
 
 static void replay_restart_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
@@ -684,6 +695,11 @@ static void replay_pause_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotk
 
 	if (pressed)
 		replay_play_pause(data, true);
+}
+
+void replay_toggle_play_pause(struct replay_source *context)
+{
+	replay_pause_hotkey(context, 0, NULL, true);
 }
 
 static void InitFileOutputLossless(struct replay_source *context)
@@ -2633,6 +2649,7 @@ void replay_source_end_action(struct replay_source *context)
 			}
 		}
 	}
+	speed_popup_notify(context);
 }
 
 static void replay_source_tick(void *data, float seconds)
