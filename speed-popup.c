@@ -18,6 +18,7 @@
 
 #include "speed-popup.h"
 #include "replay-source-internal.h"
+#include "ball-tracker.h"
 
 #ifdef _WIN32
 
@@ -58,6 +59,7 @@
 #define ID_BTN_ZOOM_150      2085
 #define ID_BTN_ZOOM_200      2086
 #define ID_BTN_ZOOM_300      2087
+#define ID_BTN_BALL_TRACKER  2095
 
 /* ------------------------------------------------------------------ */
 /*  Position persistence across show/hide and re-triggers             */
@@ -65,7 +67,7 @@
 static int  s_saved_x       = -1;
 static int  s_saved_y       = -1;
 static int  s_saved_w       = 450;
-static int  s_saved_h       = 390;
+static int  s_saved_h       = 430;
 static bool s_has_saved_pos = false;
 
 /* ------------------------------------------------------------------ */
@@ -95,6 +97,7 @@ struct speed_popup {
 	HWND   hwnd_zoom_150;
 	HWND   hwnd_zoom_200;
 	HWND   hwnd_zoom_300;
+	HWND   hwnd_ball_tracker;
 	HFONT  hfont_title;
 	HFONT  hfont_btns;
 	HBRUSH hbr_bg;
@@ -224,6 +227,11 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 			MoveWindow(zb[i], zbx, zbtn_y, bw, btn_h, TRUE);
 			zbx += bw + 2;
 		}
+
+		if (p->hwnd_ball_tracker) {
+			int tracker_y = zbtn_y + btn_h + 8;
+			MoveWindow(p->hwnd_ball_tracker, pad, tracker_y, cw - pad * 2, btn_h, TRUE);
+		}
 	}
 
 	InvalidateRect(hwnd, NULL, TRUE);
@@ -345,6 +353,11 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			SendMessageA(*zb[i].h, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 		}
 
+		p->hwnd_ball_tracker = CreateWindowExW(0, L"BUTTON", L"\u25cf  Cricket Ball Tracker (3-Point)",
+			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_BALL_TRACKER, NULL, NULL);
+		SendMessageA(p->hwnd_ball_tracker, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
+
 		popup_refresh_label(p);
 		popup_refresh_dir_buttons(p);
 		popup_refresh_play_pause_button(p);
@@ -443,6 +456,10 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		case ID_BTN_ZOOM_150:   zm = 150.0f; zm_chg = true; break;
 		case ID_BTN_ZOOM_200:   zm = 200.0f; zm_chg = true; break;
 		case ID_BTN_ZOOM_300:   zm = 300.0f; zm_chg = true; break;
+		case ID_BTN_BALL_TRACKER:
+			if (p->context && p->context->ball_tracker)
+				ball_tracker_show(p->context->ball_tracker);
+			break;
 		}
 		if (chg) {
 			if (spd < SETTING_SPEED_MIN) spd = SETTING_SPEED_MIN;
@@ -491,7 +508,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 	case WM_GETMINMAXINFO: {
 		MINMAXINFO *mmi = (MINMAXINFO *)lParam;
 		mmi->ptMinTrackSize.x = 360;
-		mmi->ptMinTrackSize.y = 350;
+		mmi->ptMinTrackSize.y = 390;
 		return 0;
 	}
 
@@ -513,7 +530,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 				}
 			} else {
 				sw = 450;
-				sh = 390;
+				sh = 430;
 				RECT rcWork;
 				SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
 				sx = rcWork.right  - sw - 24;
@@ -606,7 +623,7 @@ static DWORD WINAPI SpeedPopupThread(LPVOID param)
 		"OBSReplaySpeedMeterPopup",
 		"Replay Speed Meter",
 		WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 450, 390,
+		CW_USEDEFAULT, CW_USEDEFAULT, 450, 430,
 		NULL, NULL, GetModuleHandle(NULL), p);
 
 	if (!hwnd) {

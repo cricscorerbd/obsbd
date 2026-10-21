@@ -24,9 +24,11 @@ target_sources(${PROJECT_NAME} PRIVATE
 	replay-filter-audio.c
 	replay-filter-async.c
 	speed-popup.c
+	ball-tracker.c
 	replay.h
 	replay-source-internal.h
 	speed-popup.h
+	ball-tracker.h
 	version.h)
 
 if(BUILD_OUT_OF_TREE)

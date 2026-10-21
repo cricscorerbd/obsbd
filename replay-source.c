@@ -10,6 +10,7 @@
 #include "replay.h"
 #include "replay-source-internal.h"
 #include "speed-popup.h"
+#include "ball-tracker.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
@@ -1127,6 +1128,7 @@ static void replay_retrieve(struct replay_source *context)
 		obs_data_release(settings_ret);
 	}
 	replay_reset_zoom(context);
+	ball_tracker_reset_points(context->ball_tracker);
 	replay_update_text(context);
 
 	blog(LOG_INFO, "[replay_source: '%s'] replay added of %.2f seconds", obs_source_get_name(context->source),
@@ -1501,6 +1503,7 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 			frame->timestamp = os_timestamp;
 			c->previous_frame_timestamp = frame->timestamp;
 			struct obs_source_frame *out = replay_get_zoomed_frame(c, frame);
+			out = ball_tracker_render(c->ball_tracker, out);
 			obs_source_output_video(c->source, out);
 			frame->timestamp = t;
 			return NULL;
@@ -1543,6 +1546,7 @@ static struct obs_source_frame *replay_restart_at_end(struct replay_source *c, c
 			frame->timestamp = os_timestamp;
 			c->previous_frame_timestamp = frame->timestamp;
 			struct obs_source_frame *out = replay_get_zoomed_frame(c, frame);
+			out = ball_tracker_render(c->ball_tracker, out);
 			obs_source_output_video(c->source, out);
 			frame->timestamp = t;
 			return NULL;
@@ -1827,6 +1831,7 @@ void update_zoom(struct replay_source *context, float new_zoom)
 			uint64_t t = frame->timestamp;
 			frame->timestamp = os_timestamp;
 			struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+			out = ball_tracker_render(context->ball_tracker, out);
 			obs_source_output_video(context->source, out);
 			frame->timestamp = t;
 		}
@@ -2561,6 +2566,8 @@ static void *replay_source_create(obs_data_t *settings, obs_source_t *source)
 	context->next_n_frames_hotkey = obs_hotkey_register_source(
 		source, "ReplaySource.NextNFrames", obs_module_text("NextNFrames"), replay_next_n_frames_hotkey, context);
 
+	context->ball_tracker = ball_tracker_create(context);
+
 	return context;
 }
 
@@ -2653,6 +2660,10 @@ static void replay_source_destroy(void *data)
 	pthread_mutex_destroy(&context->audio_mutex);
 	pthread_mutex_destroy(&context->replay_mutex);
 	speed_popup_destroy(context);
+	if (context->ball_tracker) {
+		ball_tracker_destroy(context->ball_tracker);
+		context->ball_tracker = NULL;
+	}
 	bfree(context);
 }
 
@@ -2674,6 +2685,7 @@ static void replay_output_frame(struct replay_source *context, struct obs_source
 	if (context->previous_frame_timestamp <= frame->timestamp) {
 		context->previous_frame_timestamp = frame->timestamp;
 		struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+		out = ball_tracker_render(context->ball_tracker, out);
 		obs_source_output_video(context->source, out);
 	}
 	frame->timestamp = t;
@@ -2920,9 +2932,11 @@ static void replay_source_tick(void *data, float seconds)
 			t = frame->timestamp;
 			frame->timestamp = os_timestamp;
 			struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+			out = ball_tracker_render(context->ball_tracker, out);
 			obs_source_output_video(context->source, out);
 			frame->timestamp = t;
 			replay_update_text(context);
+			ball_tracker_notify_frame(context->ball_tracker);
 		}
 		pthread_mutex_unlock(&context->video_mutex);
 		return;
