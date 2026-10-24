@@ -71,20 +71,54 @@ struct ball_tracker {
 };
 
 /* ------------------------------------------------------------------ */
-/*  YUV / RGB Color Constants                                         */
+/*  YUV / RGB Color Constants & Sets                                  */
 /* ------------------------------------------------------------------ */
 struct color_def {
 	uint8_t r, g, b;
 	uint8_t y, u, v;
 };
 
-static const struct color_def s_colors[] = {
-	/* Red: Vivid Cricket Ball Red */
-	{245, 40,  50,   85, 108, 240},
-	/* Yellow: Glowing Broadcast Gold */
-	{255, 230, 20,  208,  22, 158},
-	/* Blue: High-Contrast Cyan */
-	{30,  180, 255, 138, 202,  60}
+struct tracker_color_set {
+	struct color_def base;
+	struct color_def highlight; /* Pastel tint for 3D glossy sheen */
+	COLORREF gdi_base;
+	COLORREF gdi_highlight;
+	const wchar_t *name;
+};
+
+static const struct tracker_color_set s_color_sets[BALL_TRACKER_COLOR_COUNT] = {
+	/* 0: Neon Magenta / Hot Pink (matching user reference picture) */
+	{
+		{255, 16, 160, 104, 160, 236},
+		{255, 185, 235, 211, 142, 160},
+		RGB(255, 16, 160),
+		RGB(255, 185, 235),
+		L"Color: Magenta"
+	},
+	/* 1: Cricket Ball Red */
+	{
+		{245, 35, 55, 80, 114, 245},
+		{255, 180, 190, 200, 122, 165},
+		RGB(245, 35, 55),
+		RGB(255, 180, 190),
+		L"Color: Red"
+	},
+	/* 2: Glowing Broadcast Gold / Yellow */
+	{
+		{255, 220, 20, 202, 26, 164},
+		{255, 250, 180, 247, 90, 134},
+		RGB(255, 220, 20),
+		RGB(255, 250, 180),
+		L"Color: Yellow"
+	},
+	/* 3: Electric Cyan / Sky Blue */
+	{
+		{20, 200, 255, 153, 185, 33},
+		{180, 240, 255, 229, 142, 93},
+		RGB(20, 200, 255),
+		RGB(180, 240, 255),
+		L"Color: Cyan"
+	}
 };
 
 static const struct color_def s_white = {255, 255, 255, 235, 128, 128};
@@ -190,6 +224,11 @@ struct pt2d {
 	float x, y;
 };
 
+struct traj_point {
+	float x, y;
+	float nx, ny;
+};
+
 static inline struct pt2d eval_bezier2(struct pt2d p0, struct pt2d c, struct pt2d p1, float t)
 {
 	float it = 1.0f - t;
@@ -212,7 +251,7 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	struct pt2d p0 = {bt->points[0].u * (float)frame->width, bt->points[0].v * (float)frame->height};
 	struct pt2d p1 = {bt->points[1].u * (float)frame->width, bt->points[1].v * (float)frame->height};
 	struct pt2d p2 = {bt->points[2].u * (float)frame->width, bt->points[2].v * (float)frame->height};
-	const struct color_def *color = &s_colors[bt->color % 3];
+	const struct tracker_color_set *cset = &s_color_sets[bt->color % BALL_TRACKER_COLOR_COUNT];
 
 	pthread_mutex_unlock(&bt->mutex);
 
@@ -236,71 +275,143 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 		}
 	}
 
-	/* Scale thickness based on video height */
-	int radius_core = (int)((float)frame->height / 200.0f);
-	if (radius_core < 3) radius_core = 3;
-	if (radius_core > 9) radius_core = 9;
-	int radius_glow = radius_core + 3;
+	/* Scale thickness based on video height:
+	 * 1080p -> ~9-10px radius (18-20px thick glossy capsule ribbon)
+	 * 720p  -> ~6-7px radius (12-14px thick)
+	 * 4K    -> ~18px radius (36px thick) */
+	int radius_core = (int)((float)frame->height / 110.0f);
+	if (radius_core < 4) radius_core = 4;
+	if (radius_core > 18) radius_core = 18;
 
-	/* Calculate quadratic Bézier control points */
-	/* Segment 1: Release -> Pitch (natural ballistic arc) */
+	/* Segment 1: Release -> Pitch (natural curved ballistic arc) */
 	struct pt2d c1;
 	c1.x = p0.x + (p1.x - p0.x) * 0.48f;
 	float arc1 = fabsf(p1.x - p0.x) * 0.08f;
 	if (arc1 < 25.0f) arc1 = 25.0f;
 	c1.y = ((p0.y < p1.y) ? p0.y : p1.y) - arc1;
 
-	/* Segment 2: Pitch -> Stumps (bounce rebound) */
-	struct pt2d c2;
-	c2.x = p1.x + (p2.x - p1.x) * 0.45f;
-	float arc2 = fabsf(p2.x - p1.x) * 0.05f;
-	c2.y = ((p1.y < p2.y) ? p1.y : p2.y) - arc2;
+	float d1 = sqrtf((p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y));
+	int steps1 = (int)(d1 / ((float)radius_core * 0.6f));
+	if (steps1 < 60) steps1 = 60;
+	if (steps1 > 200) steps1 = 200;
 
-	/* 1. Draw outer glow aura for Segment 1 */
-	int steps1 = 50;
+	struct traj_point pts1[220];
 	for (int i = 0; i <= steps1; i++) {
 		float t = (float)i / (float)steps1;
 		struct pt2d pt = eval_bezier2(p0, c1, p1, t);
-		draw_filled_circle(target, (int)pt.x, (int)pt.y, radius_glow, color, 65);
+		pts1[i].x = pt.x;
+		pts1[i].y = pt.y;
+
+		/* Tangent derivative of quadratic Bézier */
+		float tx = 2.0f * (1.0f - t) * (c1.x - p0.x) + 2.0f * t * (p1.x - c1.x);
+		float ty = 2.0f * (1.0f - t) * (c1.y - p0.y) + 2.0f * t * (p1.y - c1.y);
+		/* Perpendicular normal pointing upwards towards top of screen for light */
+		float nx = -ty;
+		float ny = tx;
+		if (ny > 0.0f) { nx = -nx; ny = -ny; }
+		float nlen = sqrtf(nx * nx + ny * ny);
+		if (nlen > 0.001f) {
+			pts1[i].nx = nx / nlen;
+			pts1[i].ny = ny / nlen;
+		} else {
+			pts1[i].nx = 0.0f;
+			pts1[i].ny = -1.0f;
+		}
 	}
 
-	/* 2. Draw outer glow aura for Segment 2 */
-	int steps2 = 40;
+	/* Segment 2: Pitch -> Stumps (DIRECT STRAIGHT LINE - no curve as requested) */
+	float d2 = sqrtf((p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
+	int steps2 = (int)(d2 / ((float)radius_core * 0.6f));
+	if (steps2 < 45) steps2 = 45;
+	if (steps2 > 160) steps2 = 160;
+
+	float tx2 = p2.x - p1.x;
+	float ty2 = p2.y - p1.y;
+	float nx2 = -ty2;
+	float ny2 = tx2;
+	if (ny2 > 0.0f) { nx2 = -nx2; ny2 = -ny2; }
+	float nlen2 = sqrtf(nx2 * nx2 + ny2 * ny2);
+	if (nlen2 > 0.001f) {
+		nx2 /= nlen2;
+		ny2 /= nlen2;
+	} else {
+		nx2 = 0.0f;
+		ny2 = -1.0f;
+	}
+
+	struct traj_point pts2[180];
 	for (int i = 0; i <= steps2; i++) {
 		float t = (float)i / (float)steps2;
-		struct pt2d pt = eval_bezier2(p1, c2, p2, t);
-		draw_filled_circle(target, (int)pt.x, (int)pt.y, radius_glow, color, 65);
+		pts2[i].x = p1.x + (p2.x - p1.x) * t;
+		pts2[i].y = p1.y + (p2.y - p1.y) * t;
+		pts2[i].nx = nx2;
+		pts2[i].ny = ny2;
 	}
 
-	/* 3. Draw core solid ribbon for Segment 1 */
+	/* --- 4-Pass 3D Glossy Capsule Ribbon Shading --- */
+
+	/* Pass 1: Soft Ambient Outer Glow Aura */
+	int radius_glow = radius_core + 5;
+	for (int i = 0; i <= steps1; i++)
+		draw_filled_circle(target, (int)pts1[i].x, (int)pts1[i].y, radius_glow, &cset->base, 55);
+	for (int i = 0; i <= steps2; i++)
+		draw_filled_circle(target, (int)pts2[i].x, (int)pts2[i].y, radius_glow, &cset->base, 55);
+
+	/* Pass 2: Solid Vibrant Capsule Core Body (Smooth rounded cylinder/capsule ends) */
+	for (int i = 0; i <= steps1; i++)
+		draw_filled_circle(target, (int)pts1[i].x, (int)pts1[i].y, radius_core, &cset->base, 255);
+	for (int i = 0; i <= steps2; i++)
+		draw_filled_circle(target, (int)pts2[i].x, (int)pts2[i].y, radius_core, &cset->base, 255);
+
+	/* Pass 3: Soft Glossy Cylindrical Sheen (Pastel gradient highlight on upper ridge) */
+	int r_sheen = (int)((float)radius_core * 0.58f);
+	if (r_sheen < 2) r_sheen = 2;
+	float off_sheen = (float)radius_core * 0.28f;
 	for (int i = 0; i <= steps1; i++) {
-		float t = (float)i / (float)steps1;
-		struct pt2d pt = eval_bezier2(p0, c1, p1, t);
-		draw_filled_circle(target, (int)pt.x, (int)pt.y, radius_core, color, 240);
+		int sx = (int)(pts1[i].x + pts1[i].nx * off_sheen);
+		int sy = (int)(pts1[i].y + pts1[i].ny * off_sheen);
+		draw_filled_circle(target, sx, sy, r_sheen, &cset->highlight, 160);
 	}
-
-	/* 4. Draw core solid ribbon for Segment 2 */
 	for (int i = 0; i <= steps2; i++) {
-		float t = (float)i / (float)steps2;
-		struct pt2d pt = eval_bezier2(p1, c2, p2, t);
-		draw_filled_circle(target, (int)pt.x, (int)pt.y, radius_core, color, 240);
+		int sx = (int)(pts2[i].x + pts2[i].nx * off_sheen);
+		int sy = (int)(pts2[i].y + pts2[i].ny * off_sheen);
+		draw_filled_circle(target, sx, sy, r_sheen, &cset->highlight, 160);
 	}
 
-	/* 5. Draw Point 1: Release Ball Sphere */
-	int ball_r = radius_core * 2 + 2;
-	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r + 2, color, 120);
-	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r, color, 255);
-	draw_filled_circle(target, (int)p0.x - ball_r / 3, (int)p0.y - ball_r / 3, ball_r / 3, &s_white, 200);
+	/* Pass 4: Sharp Specular White Reflection Streak (Glossy shine like reference photo) */
+	int r_spec = (int)((float)radius_core * 0.28f);
+	if (r_spec < 2) r_spec = 2;
+	float off_spec = (float)radius_core * 0.42f;
+	for (int i = 0; i <= steps1; i++) {
+		int hx = (int)(pts1[i].x + pts1[i].nx * off_spec);
+		int hy = (int)(pts1[i].y + pts1[i].ny * off_spec);
+		draw_filled_circle(target, hx, hy, r_spec, &s_white, 220);
+	}
+	for (int i = 0; i <= steps2; i++) {
+		int hx = (int)(pts2[i].x + pts2[i].nx * off_spec);
+		int hy = (int)(pts2[i].y + pts2[i].ny * off_spec);
+		draw_filled_circle(target, hx, hy, r_spec, &s_white, 220);
+	}
 
-	/* 6. Draw Point 2: Pitch Impact Spot */
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r + 4, color, 100);
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r, color, 255);
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r / 2, &s_white, 220);
+	/* Point 1: 3D Glossy Release Ball Sphere */
+	int ball_r = (int)((float)radius_core * 1.7f);
+	if (ball_r < 6) ball_r = 6;
+	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r + 4, &cset->base, 100);
+	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r, &cset->base, 255);
+	draw_filled_circle(target, (int)p0.x - ball_r / 3, (int)p0.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
+	draw_filled_circle(target, (int)p0.x - ball_r / 3, (int)p0.y - ball_r / 3, ball_r / 3, &s_white, 230);
 
-	/* 7. Draw Point 3: Stumps/End Ball */
-	draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r + 2, color, 120);
-	draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r, color, 255);
-	draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r / 3, &s_white, 200);
+	/* Point 2: Turf Impact Bounce Ring & Flash Spot */
+	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r + 6, &cset->base, 70);
+	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r + 2, &cset->highlight, 150);
+	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r, &cset->base, 255);
+	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r / 2, &s_white, 240);
+
+	/* Point 3: 3D Glossy Stumps Impact / Target Ball */
+	draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r + 4, &cset->base, 100);
+	draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r, &cset->base, 255);
+	draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
+	draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r / 3, &s_white, 230);
 
 	return target;
 }
@@ -337,10 +448,8 @@ static void update_status_text(struct ball_tracker *bt)
 		SetWindowTextW(bt->hwnd_btn_toggle, bt->enabled ? L"Line: ON" : L"Line: OFF");
 	}
 	if (bt->hwnd_btn_color) {
-		const wchar_t *cname = (bt->color == BALL_TRACKER_COLOR_RED)    ? L"Color: Red" :
-		                        (bt->color == BALL_TRACKER_COLOR_YELLOW) ? L"Color: Yellow" :
-		                                                                   L"Color: Blue";
-		SetWindowTextW(bt->hwnd_btn_color, cname);
+		const struct tracker_color_set *cset = &s_color_sets[bt->color % BALL_TRACKER_COLOR_COUNT];
+		SetWindowTextW(bt->hwnd_btn_color, cset->name);
 	}
 }
 
@@ -564,12 +673,7 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 
 		/* Draw trajectory line & markers on canvas DC */
 		if (bt->point_count >= 1) {
-			COLORREF pen_col = (bt->color == BALL_TRACKER_COLOR_RED)    ? RGB(250, 40, 50) :
-			                   (bt->color == BALL_TRACKER_COLOR_YELLOW) ? RGB(255, 230, 20) :
-			                                                              RGB(30, 180, 255);
-			HPEN hPenCurve = CreatePen(PS_SOLID, 4, pen_col);
-			HPEN hOldPen = (HPEN)SelectObject(hdc, hPenCurve);
-
+			const struct tracker_color_set *cset = &s_color_sets[bt->color % BALL_TRACKER_COLOR_COUNT];
 			int px0 = cx + (int)(bt->points[0].u * PREVIEW_WIDTH);
 			int py0 = cy + (int)(bt->points[0].v * PREVIEW_HEIGHT);
 
@@ -577,7 +681,7 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 				int px1 = cx + (int)(bt->points[1].u * PREVIEW_WIDTH);
 				int py1 = cy + (int)(bt->points[1].v * PREVIEW_HEIGHT);
 
-				/* Parabolic Bézier arc 1 */
+				/* Parabolic Bézier arc 1: Release -> Pitch */
 				struct pt2d c1;
 				c1.x = (float)px0 + (float)(px1 - px0) * 0.48f;
 				float a1 = fabsf((float)(px1 - px0)) * 0.08f;
@@ -586,6 +690,11 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 
 				struct pt2d start = {(float)px0, (float)py0};
 				struct pt2d end1 = {(float)px1, (float)py1};
+
+				/* 1. Base thick capsule line */
+				HPEN hPenBase = CreatePen(PS_SOLID, 8, cset->gdi_base);
+				HPEN hOldPen = (HPEN)SelectObject(hdc, hPenBase);
+
 				MoveToEx(hdc, px0, py0, NULL);
 				for (int i = 1; i <= 30; i++) {
 					struct pt2d p = eval_bezier2(start, c1, end1, (float)i / 30.0f);
@@ -595,22 +704,30 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 				if (bt->point_count >= 3) {
 					int px2 = cx + (int)(bt->points[2].u * PREVIEW_WIDTH);
 					int py2 = cy + (int)(bt->points[2].v * PREVIEW_HEIGHT);
-
-					/* Parabolic Bézier arc 2 */
-					struct pt2d c2;
-					c2.x = (float)px1 + (float)(px2 - px1) * 0.45f;
-					float a2 = fabsf((float)(px2 - px1)) * 0.05f;
-					c2.y = ((py1 < py2) ? (float)py1 : (float)py2) - a2;
-
-					struct pt2d end2 = {(float)px2, (float)py2};
-					for (int i = 1; i <= 25; i++) {
-						struct pt2d p = eval_bezier2(end1, c2, end2, (float)i / 25.0f);
-						LineTo(hdc, (int)p.x, (int)p.y);
-					}
+					/* Segment 2: Pitch -> Stumps is a STRAIGHT LINE (no curve)! */
+					LineTo(hdc, px2, py2);
 				}
+
+				/* 2. Glossy highlight streak on top */
+				HPEN hPenGloss = CreatePen(PS_SOLID, 3, cset->gdi_highlight);
+				SelectObject(hdc, hPenGloss);
+				DeleteObject(hPenBase);
+
+				MoveToEx(hdc, px0, py0 - 2, NULL);
+				for (int i = 1; i <= 30; i++) {
+					struct pt2d p = eval_bezier2(start, c1, end1, (float)i / 30.0f);
+					LineTo(hdc, (int)p.x, (int)p.y - 2);
+				}
+
+				if (bt->point_count >= 3) {
+					int px2 = cx + (int)(bt->points[2].u * PREVIEW_WIDTH);
+					int py2 = cy + (int)(bt->points[2].v * PREVIEW_HEIGHT);
+					LineTo(hdc, px2, py2 - 2);
+				}
+
+				SelectObject(hdc, hOldPen);
+				DeleteObject(hPenGloss);
 			}
-			SelectObject(hdc, hOldPen);
-			DeleteObject(hPenCurve);
 
 			/* Draw point badges: ① Release, ② Pitch, ③ Stumps */
 			const char *labels[] = {"1. Release", "2. Pitch", "3. Stumps"};
@@ -801,7 +918,7 @@ struct ball_tracker *ball_tracker_create(struct replay_source *context)
 	struct ball_tracker *bt = bzalloc(sizeof(*bt));
 	bt->context = context;
 	pthread_mutex_init(&bt->mutex, NULL);
-	bt->color = BALL_TRACKER_COLOR_RED;
+	bt->color = BALL_TRACKER_COLOR_MAGENTA;
 	bt->thickness = 5;
 	bt->enabled = false;
 	bt->point_count = 0;
@@ -892,7 +1009,7 @@ void ball_tracker_cycle_color(struct ball_tracker *bt)
 {
 	if (!bt) return;
 	pthread_mutex_lock(&bt->mutex);
-	bt->color = (bt->color + 1) % 3;
+	bt->color = (bt->color + 1) % BALL_TRACKER_COLOR_COUNT;
 	pthread_mutex_unlock(&bt->mutex);
 	update_status_text(bt);
 	if (bt->hwnd && bt->is_showing)

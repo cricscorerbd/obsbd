@@ -8,10 +8,12 @@ extern "C" {
 #endif
 
 enum ball_tracker_color {
-	BALL_TRACKER_COLOR_RED = 0,
-	BALL_TRACKER_COLOR_YELLOW = 1,
-	BALL_TRACKER_COLOR_BLUE = 2
+	BALL_TRACKER_COLOR_MAGENTA = 0,
+	BALL_TRACKER_COLOR_RED = 1,
+	BALL_TRACKER_COLOR_YELLOW = 2,
+	BALL_TRACKER_COLOR_BLUE = 3
 };
+#define BALL_TRACKER_COLOR_COUNT 4
 
 struct ball_point {
 	float u; /* 0.0f .. 1.0f */
