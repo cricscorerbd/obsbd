@@ -23,9 +23,6 @@
 #define ID_BTN_CLOSE       3013
 #define ID_BTN_ANIMATE     3014
 
-#define PREVIEW_WIDTH  550
-#define PREVIEW_HEIGHT 310
-
 struct ball_tracker {
 	struct replay_source *context;
 	pthread_mutex_t mutex;
@@ -41,6 +38,19 @@ struct ball_tracker {
 	bool is_animating;
 	uint64_t anim_start_ns;
 	uint64_t anim_duration_ns;
+
+	/* Window geometry persistence */
+	int saved_x;
+	int saved_y;
+	int saved_w;
+	int saved_h;
+	bool has_saved_pos;
+
+	/* Dynamic preview canvas bounds */
+	int preview_x;
+	int preview_y;
+	int preview_w;
+	int preview_h;
 
 	/* Output frame overlay buffer */
 	struct obs_source_frame *overlay_frame;
@@ -72,10 +82,18 @@ struct ball_tracker {
 	video_scaler_t *preview_scaler;
 	uint32_t preview_scaler_w;
 	uint32_t preview_scaler_h;
+	uint32_t preview_scaler_target_w;
+	uint32_t preview_scaler_target_h;
 	enum video_format preview_scaler_format;
 	uint8_t *preview_pixels;
 	uint32_t preview_linesize;
 };
+
+static int s_bt_saved_x = 0;
+static int s_bt_saved_y = 0;
+static int s_bt_saved_w = 840;
+static int s_bt_saved_h = 620;
+static bool s_bt_has_saved_pos = false;
 
 /* ------------------------------------------------------------------ */
 /*  YUV / RGB Color Constants & Sets                                  */
@@ -275,33 +293,31 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 
 	pthread_mutex_unlock(&bt->mutex);
 
-	/* Determine target frame: if frame is already zoomed_frame, write directly.
-	 * Otherwise copy to overlay_frame to keep stored replay buffer untouched! */
-	struct obs_source_frame *target = frame;
-	if (!bt->context || frame != bt->context->zoomed_frame) {
-		if (!bt->overlay_frame ||
-		    bt->overlay_frame->width != frame->width ||
-		    bt->overlay_frame->height != frame->height ||
-		    bt->overlay_frame->format != frame->format) {
-			if (bt->overlay_frame) {
-				obs_source_frame_destroy(bt->overlay_frame);
-				bt->overlay_frame = NULL;
-			}
-			bt->overlay_frame = obs_source_frame_create(frame->format, frame->width, frame->height);
-		}
+	/* Always copy to bt->overlay_frame before drawing to guarantee
+	 * that raw stored replay buffer frames and zoomed_frames are NEVER modified! */
+	if (!bt->overlay_frame ||
+	    bt->overlay_frame->width != frame->width ||
+	    bt->overlay_frame->height != frame->height ||
+	    bt->overlay_frame->format != frame->format) {
 		if (bt->overlay_frame) {
-			obs_source_frame_copy(bt->overlay_frame, frame);
-			target = bt->overlay_frame;
+			obs_source_frame_destroy(bt->overlay_frame);
+			bt->overlay_frame = NULL;
 		}
+		bt->overlay_frame = obs_source_frame_create(frame->format, frame->width, frame->height);
+	}
+	struct obs_source_frame *target = frame;
+	if (bt->overlay_frame) {
+		obs_source_frame_copy(bt->overlay_frame, frame);
+		target = bt->overlay_frame;
 	}
 
-	/* Scale thickness based on video height:
-	 * 1080p -> ~9-10px radius (18-20px thick glossy capsule ribbon)
-	 * 720p  -> ~6-7px radius (12-14px thick)
-	 * 4K    -> ~18px radius (36px thick) */
-	int radius_core = (int)((float)frame->height / 110.0f);
-	if (radius_core < 4) radius_core = 4;
-	if (radius_core > 18) radius_core = 18;
+	/* Scale thickness based on video height (sleek & smooth broadcast ribbon):
+	 * 1080p -> ~6-7px radius (12-14px thick glossy capsule ribbon)
+	 * 720p  -> ~4-5px radius (8-10px thick)
+	 * 4K    -> ~13-14px radius (26-28px thick) */
+	int radius_core = (int)((float)frame->height / 160.0f);
+	if (radius_core < 3) radius_core = 3;
+	if (radius_core > 14) radius_core = 14;
 
 	/* Segment 1: Release -> Pitch (natural curved ballistic arc) */
 	struct pt2d c1;
@@ -311,11 +327,11 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	c1.y = ((p0.y < p1.y) ? p0.y : p1.y) - arc1;
 
 	float d1 = sqrtf((p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y));
-	int steps1 = (int)(d1 / ((float)radius_core * 0.6f));
-	if (steps1 < 60) steps1 = 60;
-	if (steps1 > 200) steps1 = 200;
+	int steps1 = (int)(d1 / ((float)radius_core * 0.35f));
+	if (steps1 < 90) steps1 = 90;
+	if (steps1 > 350) steps1 = 350;
 
-	struct traj_point pts1[220];
+	struct traj_point pts1[380];
 	for (int i = 0; i <= steps1; i++) {
 		float t = (float)i / (float)steps1;
 		struct pt2d pt = eval_bezier2(p0, c1, p1, t);
@@ -341,9 +357,9 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 
 	/* Segment 2: Pitch -> Stumps (DIRECT STRAIGHT LINE - no curve as requested) */
 	float d2 = sqrtf((p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
-	int steps2 = (int)(d2 / ((float)radius_core * 0.6f));
-	if (steps2 < 45) steps2 = 45;
-	if (steps2 > 160) steps2 = 160;
+	int steps2 = (int)(d2 / ((float)radius_core * 0.35f));
+	if (steps2 < 70) steps2 = 70;
+	if (steps2 > 280) steps2 = 280;
 
 	float tx2 = p2.x - p1.x;
 	float ty2 = p2.y - p1.y;
@@ -359,7 +375,7 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 		ny2 = -1.0f;
 	}
 
-	struct traj_point pts2[180];
+	struct traj_point pts2[300];
 	for (int i = 0; i <= steps2; i++) {
 		float t = (float)i / (float)steps2;
 		pts2[i].x = p1.x + (p2.x - p1.x) * t;
@@ -404,7 +420,7 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	/* --- 4-Pass 3D Glossy Capsule Ribbon Shading --- */
 
 	/* Pass 1: Soft Ambient Outer Glow Aura */
-	int radius_glow = radius_core + 5;
+	int radius_glow = radius_core + 3;
 	for (int i = 0; i <= active_steps1; i++)
 		draw_filled_circle(target, (int)pts1[i].x, (int)pts1[i].y, radius_glow, &cset->base, 55);
 	if (active_steps2 >= 0) {
@@ -421,8 +437,8 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	}
 
 	/* Pass 3: Soft Glossy Cylindrical Sheen (Pastel gradient highlight on upper ridge) */
-	int r_sheen = (int)((float)radius_core * 0.58f);
-	if (r_sheen < 2) r_sheen = 2;
+	int r_sheen = (int)((float)radius_core * 0.55f);
+	if (r_sheen < 1) r_sheen = 1;
 	float off_sheen = (float)radius_core * 0.28f;
 	for (int i = 0; i <= active_steps1; i++) {
 		int sx = (int)(pts1[i].x + pts1[i].nx * off_sheen);
@@ -439,8 +455,8 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 
 	/* Pass 4: Sharp Specular White Reflection Streak (Glossy shine like reference photo) */
 	int r_spec = (int)((float)radius_core * 0.28f);
-	if (r_spec < 2) r_spec = 2;
-	float off_spec = (float)radius_core * 0.42f;
+	if (r_spec < 1) r_spec = 1;
+	float off_spec = (float)radius_core * 0.40f;
 	for (int i = 0; i <= active_steps1; i++) {
 		int hx = (int)(pts1[i].x + pts1[i].nx * off_spec);
 		int hy = (int)(pts1[i].y + pts1[i].ny * off_spec);
@@ -455,8 +471,8 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	}
 
 	/* Point 1: 3D Glossy Release Ball Sphere (Bowler's release point) */
-	int ball_r = (int)((float)radius_core * 1.7f);
-	if (ball_r < 6) ball_r = 6;
+	int ball_r = (int)((float)radius_core * 1.6f);
+	if (ball_r < 5) ball_r = 5;
 	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r + 4, &cset->base, 100);
 	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r, &cset->base, 255);
 	draw_filled_circle(target, (int)p0.x - ball_r / 3, (int)p0.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
@@ -535,6 +551,7 @@ static void trigger_paused_rerender(struct ball_tracker *bt)
 		return;
 	struct replay_source *c = bt->context;
 	if (!c->play && c->current_replay.video_frame_count) {
+		pthread_mutex_lock(&c->video_mutex);
 		uint64_t pos = c->video_frame_position;
 		if (pos >= c->current_replay.video_frame_count)
 			pos = c->current_replay.video_frame_count - 1;
@@ -547,8 +564,93 @@ static void trigger_paused_rerender(struct ball_tracker *bt)
 			out = ball_tracker_render(bt, out);
 			obs_source_output_video(c->source, out);
 			f->timestamp = orig_ts;
+			c->stepped = true;
+		}
+		pthread_mutex_unlock(&c->video_mutex);
+	}
+}
+
+static void ball_tracker_layout(struct ball_tracker *bt, int client_w, int client_h)
+{
+	if (!bt || !bt->hwnd || client_w <= 0 || client_h <= 0)
+		return;
+
+	const int margin_x = 14;
+	const int status_y = 10;
+	const int status_h = 26;
+
+	if (bt->hwnd_status) {
+		SetWindowPos(bt->hwnd_status, NULL,
+			margin_x, status_y,
+			client_w - 2 * margin_x, status_h,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+
+	const int btn_h = 30;
+	const int row_gap = 8;
+	const int bottom_margin = 12;
+
+	int btn_y2 = client_h - bottom_margin - btn_h;
+	int btn_y1 = btn_y2 - row_gap - btn_h;
+
+	/* Row 1 buttons (5 buttons: Prev5, Prev1, Play/Pause, Next1, Next5) */
+	HWND row1_btns[] = {
+		bt->hwnd_btn_prev5, bt->hwnd_btn_prev1,
+		bt->hwnd_btn_play_pause,
+		bt->hwnd_btn_next1, bt->hwnd_btn_next5
+	};
+	int total_avail_w = client_w - 2 * margin_x;
+	int gap1 = 8;
+	int btn_w1 = (total_avail_w - 4 * gap1) / 5;
+	if (btn_w1 < 50) btn_w1 = 50;
+	for (int i = 0; i < 5; i++) {
+		if (row1_btns[i]) {
+			int bx = margin_x + i * (btn_w1 + gap1);
+			SetWindowPos(row1_btns[i], NULL, bx, btn_y1, btn_w1, btn_h,
+				SWP_NOZORDER | SWP_NOACTIVATE);
 		}
 	}
+
+	/* Row 2 buttons (5 buttons: Reset, Animate, Line Toggle, Color, Close) */
+	HWND row2_btns[] = {
+		bt->hwnd_btn_reset, bt->hwnd_btn_animate,
+		bt->hwnd_btn_toggle, bt->hwnd_btn_color,
+		bt->hwnd_btn_close
+	};
+	int gap2 = 8;
+	int btn_w2 = (total_avail_w - 4 * gap2) / 5;
+	if (btn_w2 < 50) btn_w2 = 50;
+	for (int i = 0; i < 5; i++) {
+		if (row2_btns[i]) {
+			int bx = margin_x + i * (btn_w2 + gap2);
+			SetWindowPos(row2_btns[i], NULL, bx, btn_y2, btn_w2, btn_h,
+				SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+	}
+
+	/* Preview canvas area */
+	int top_limit = status_y + status_h + 8;
+	int bot_limit = btn_y1 - 10;
+	int avail_h = bot_limit - top_limit;
+	int avail_w = client_w - 2 * margin_x;
+
+	if (avail_w < 50) avail_w = 50;
+	if (avail_h < 50) avail_h = 50;
+
+	/* Fit 16:9 aspect ratio inside avail_w x avail_h */
+	int target_w = avail_w;
+	int target_h = (int)((float)target_w * 9.0f / 16.0f);
+	if (target_h > avail_h) {
+		target_h = avail_h;
+		target_w = (int)((float)target_h * 16.0f / 9.0f);
+	}
+	if (target_w < 16) target_w = 16;
+	if (target_h < 9)  target_h = 9;
+
+	bt->preview_x = margin_x + (avail_w - target_w) / 2;
+	bt->preview_y = top_limit + (avail_h - target_h) / 2;
+	bt->preview_w = target_w;
+	bt->preview_h = target_h;
 }
 
 static void update_preview_buffer(struct ball_tracker *bt)
@@ -565,15 +667,24 @@ static void update_preview_buffer(struct ball_tracker *bt)
 	struct obs_source_frame *src = c->current_replay.video_frames[pos];
 	if (!src) return;
 
-	if (!bt->preview_pixels) {
-		bt->preview_linesize = PREVIEW_WIDTH * 4;
-		bt->preview_pixels = bzalloc(bt->preview_linesize * PREVIEW_HEIGHT);
+	int pw = bt->preview_w > 0 ? bt->preview_w : 760;
+	int ph = bt->preview_h > 0 ? bt->preview_h : 428;
+
+	uint32_t target_linesize = (uint32_t)pw * 4;
+	if (!bt->preview_pixels || bt->preview_linesize != target_linesize ||
+	    bt->preview_scaler_target_h != (uint32_t)ph) {
+		if (bt->preview_pixels)
+			bfree(bt->preview_pixels);
+		bt->preview_linesize = target_linesize;
+		bt->preview_pixels = bzalloc(bt->preview_linesize * ph);
 	}
 
 	if (!bt->preview_scaler ||
 	    bt->preview_scaler_w != src->width ||
 	    bt->preview_scaler_h != src->height ||
-	    bt->preview_scaler_format != src->format) {
+	    bt->preview_scaler_format != src->format ||
+	    bt->preview_scaler_target_w != (uint32_t)pw ||
+	    bt->preview_scaler_target_h != (uint32_t)ph) {
 		if (bt->preview_scaler) {
 			video_scaler_destroy(bt->preview_scaler);
 			bt->preview_scaler = NULL;
@@ -598,8 +709,8 @@ static void update_preview_buffer(struct ball_tracker *bt)
 		struct video_scale_info dsi;
 		memset(&dsi, 0, sizeof(dsi));
 		dsi.format = VIDEO_FORMAT_BGRA;
-		dsi.width = PREVIEW_WIDTH;
-		dsi.height = PREVIEW_HEIGHT;
+		dsi.width = pw;
+		dsi.height = ph;
 		dsi.range = range;
 		dsi.colorspace = cs;
 
@@ -610,6 +721,8 @@ static void update_preview_buffer(struct ball_tracker *bt)
 		bt->preview_scaler_w = src->width;
 		bt->preview_scaler_h = src->height;
 		bt->preview_scaler_format = src->format;
+		bt->preview_scaler_target_w = (uint32_t)pw;
+		bt->preview_scaler_target_h = (uint32_t)ph;
 	}
 
 	uint8_t *dst_data[1] = {bt->preview_pixels};
@@ -642,50 +755,42 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 		/* Top status text */
 		bt->hwnd_status = CreateWindowExA(0, "STATIC", "",
 			WS_CHILD | WS_VISIBLE | SS_CENTER,
-			15, 10, PREVIEW_WIDTH, 26, hwnd, NULL, NULL, NULL);
+			0, 0, 0, 0, hwnd, NULL, NULL, NULL);
 		SendMessageA(bt->hwnd_status, WM_SETFONT, (WPARAM)bt->hfont_status, TRUE);
 
 		/* Control buttons Row 1: Scrubbing */
-		int btn_y1 = 360;
-		int btn_w = 100;
-		int btn_h = 28;
-		int gap = 12;
-
 		bt->hwnd_btn_prev5 = CreateWindowExW(0, L"BUTTON", L"\u25c4 -5",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15, btn_y1, btn_w, btn_h, hwnd, (HMENU)ID_BTN_PREV5, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_PREV5, NULL, NULL);
 		bt->hwnd_btn_prev1 = CreateWindowExW(0, L"BUTTON", L"\u25c4 -1",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (btn_w + gap), btn_y1, btn_w, btn_h, hwnd, (HMENU)ID_BTN_PREV1, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_PREV1, NULL, NULL);
 		bt->hwnd_btn_play_pause = CreateWindowExW(0, L"BUTTON", L"|| Pause",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (btn_w + gap) * 2, btn_y1, btn_w, btn_h, hwnd, (HMENU)ID_BTN_PLAY_PAUSE, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_PLAY_PAUSE, NULL, NULL);
 		bt->hwnd_btn_next1 = CreateWindowExW(0, L"BUTTON", L"+1 \u25ba",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (btn_w + gap) * 3, btn_y1, btn_w, btn_h, hwnd, (HMENU)ID_BTN_NEXT1, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_NEXT1, NULL, NULL);
 		bt->hwnd_btn_next5 = CreateWindowExW(0, L"BUTTON", L"+5 \u25ba",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (btn_w + gap) * 4, btn_y1, btn_w, btn_h, hwnd, (HMENU)ID_BTN_NEXT5, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_NEXT5, NULL, NULL);
 
 		/* Control buttons Row 2: Tracker controls */
-		int btn_y2 = 398;
-		int bw2 = 98;
-		int bgap2 = 15;
 		bt->hwnd_btn_reset = CreateWindowExW(0, L"BUTTON", L"\u21bb Reset",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_RESET, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_RESET, NULL, NULL);
 		bt->hwnd_btn_animate = CreateWindowExW(0, L"BUTTON", L"\u25b6 Animate",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (bw2 + bgap2), btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_ANIMATE, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_ANIMATE, NULL, NULL);
 		bt->hwnd_btn_toggle = CreateWindowExW(0, L"BUTTON", L"Line: ON",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (bw2 + bgap2) * 2, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_TOGGLE, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_TOGGLE, NULL, NULL);
 		bt->hwnd_btn_color = CreateWindowExW(0, L"BUTTON", L"Color: Red",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (bw2 + bgap2) * 3, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_COLOR, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_COLOR, NULL, NULL);
 		bt->hwnd_btn_close = CreateWindowExW(0, L"BUTTON", L"\u2715 Close",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (bw2 + bgap2) * 4, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_CLOSE, NULL, NULL);
+			0, 0, 0, 0, hwnd, (HMENU)ID_BTN_CLOSE, NULL, NULL);
 
 		HWND all_btns[] = {bt->hwnd_btn_prev5, bt->hwnd_btn_prev1, bt->hwnd_btn_play_pause,
 		                   bt->hwnd_btn_next1, bt->hwnd_btn_next5, bt->hwnd_btn_reset,
@@ -694,8 +799,64 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 			SendMessageA(all_btns[i], WM_SETFONT, (WPARAM)bt->hfont_btns, TRUE);
 		}
 
+		RECT rcClient;
+		GetClientRect(hwnd, &rcClient);
+		ball_tracker_layout(bt, rcClient.right - rcClient.left, rcClient.bottom - rcClient.top);
+
 		update_status_text(bt);
 		return 0;
+	}
+
+	case WM_GETMINMAXINFO: {
+		MINMAXINFO *mmi = (MINMAXINFO *)lParam;
+		mmi->ptMinTrackSize.x = 640;
+		mmi->ptMinTrackSize.y = 480;
+		return 0;
+	}
+
+	case WM_SIZE: {
+		if (bt) {
+			int w = LOWORD(lParam);
+			int h = HIWORD(lParam);
+			ball_tracker_layout(bt, w, h);
+			InvalidateRect(hwnd, NULL, FALSE);
+		}
+		return 0;
+	}
+
+	case WM_WINDOWPOSCHANGED: {
+		WINDOWPOS *wp = (WINDOWPOS *)lParam;
+		if (bt && (!(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE))) {
+			RECT wr;
+			GetWindowRect(hwnd, &wr);
+			int ww = wr.right - wr.left;
+			int wh = wr.bottom - wr.top;
+			if (ww >= 500 && wh >= 400 && !IsIconic(hwnd)) {
+				bt->saved_x = wr.left;
+				bt->saved_y = wr.top;
+				bt->saved_w = ww;
+				bt->saved_h = wh;
+				bt->has_saved_pos = true;
+
+				s_bt_saved_x = wr.left;
+				s_bt_saved_y = wr.top;
+				s_bt_saved_w = ww;
+				s_bt_saved_h = wh;
+				s_bt_has_saved_pos = true;
+
+				if (bt->context && bt->context->source) {
+					obs_data_t *settings = obs_source_get_settings(bt->context->source);
+					if (settings) {
+						obs_data_set_int(settings, "ball_tracker_win_x", bt->saved_x);
+						obs_data_set_int(settings, "ball_tracker_win_y", bt->saved_y);
+						obs_data_set_int(settings, "ball_tracker_win_w", bt->saved_w);
+						obs_data_set_int(settings, "ball_tracker_win_h", bt->saved_h);
+						obs_data_release(settings);
+					}
+				}
+			}
+		}
+		break;
 	}
 
 	case WM_CTLCOLORSTATIC: {
@@ -732,34 +893,37 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 
 		/* Render preview frame */
 		update_preview_buffer(bt);
-		int cx = 15;
-		int cy = 42;
-		if (bt->preview_pixels) {
+		int cx = bt->preview_x;
+		int cy = bt->preview_y;
+		int pw = bt->preview_w;
+		int ph = bt->preview_h;
+
+		if (bt->preview_pixels && pw > 0 && ph > 0) {
 			BITMAPINFO bmi = {0};
 			bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-			bmi.bmiHeader.biWidth = PREVIEW_WIDTH;
-			bmi.bmiHeader.biHeight = -PREVIEW_HEIGHT;
+			bmi.bmiHeader.biWidth = pw;
+			bmi.bmiHeader.biHeight = -ph;
 			bmi.bmiHeader.biPlanes = 1;
 			bmi.bmiHeader.biBitCount = 32;
 			bmi.bmiHeader.biCompression = BI_RGB;
 
-			StretchDIBits(hdc, cx, cy, PREVIEW_WIDTH, PREVIEW_HEIGHT,
-			              0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT,
+			StretchDIBits(hdc, cx, cy, pw, ph,
+			              0, 0, pw, ph,
 			              bt->preview_pixels, &bmi, DIB_RGB_COLORS, SRCCOPY);
-		} else {
-			RECT rcBox = {cx, cy, cx + PREVIEW_WIDTH, cy + PREVIEW_HEIGHT};
+		} else if (pw > 0 && ph > 0) {
+			RECT rcBox = {cx, cy, cx + pw, cy + ph};
 			FillRect(hdc, &rcBox, bt->hbr_canvas_border);
 		}
 
 		/* Draw trajectory line & markers on canvas DC */
-		if (bt->point_count >= 1) {
+		if (bt->point_count >= 1 && pw > 0 && ph > 0) {
 			const struct tracker_color_set *cset = &s_color_sets[bt->color % BALL_TRACKER_COLOR_COUNT];
-			int px0 = cx + (int)(bt->points[0].u * PREVIEW_WIDTH);
-			int py0 = cy + (int)(bt->points[0].v * PREVIEW_HEIGHT);
+			int px0 = cx + (int)(bt->points[0].u * (float)pw);
+			int py0 = cy + (int)(bt->points[0].v * (float)ph);
 
 			if (bt->point_count >= 2) {
-				int px1 = cx + (int)(bt->points[1].u * PREVIEW_WIDTH);
-				int py1 = cy + (int)(bt->points[1].v * PREVIEW_HEIGHT);
+				int px1 = cx + (int)(bt->points[1].u * (float)pw);
+				int py1 = cy + (int)(bt->points[1].v * (float)ph);
 
 				/* Parabolic Bézier arc 1: Release -> Pitch */
 				struct pt2d c1;
@@ -771,38 +935,38 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 				struct pt2d start = {(float)px0, (float)py0};
 				struct pt2d end1 = {(float)px1, (float)py1};
 
-				/* 1. Base thick capsule line */
-				HPEN hPenBase = CreatePen(PS_SOLID, 8, cset->gdi_base);
+				/* 1. Base capsule line (sleek and smooth: 5px) */
+				HPEN hPenBase = CreatePen(PS_SOLID, 5, cset->gdi_base);
 				HPEN hOldPen = (HPEN)SelectObject(hdc, hPenBase);
 
 				MoveToEx(hdc, px0, py0, NULL);
-				for (int i = 1; i <= 30; i++) {
-					struct pt2d p = eval_bezier2(start, c1, end1, (float)i / 30.0f);
+				for (int i = 1; i <= 60; i++) {
+					struct pt2d p = eval_bezier2(start, c1, end1, (float)i / 60.0f);
 					LineTo(hdc, (int)p.x, (int)p.y);
 				}
 
 				if (bt->point_count >= 3) {
-					int px2 = cx + (int)(bt->points[2].u * PREVIEW_WIDTH);
-					int py2 = cy + (int)(bt->points[2].v * PREVIEW_HEIGHT);
+					int px2 = cx + (int)(bt->points[2].u * (float)pw);
+					int py2 = cy + (int)(bt->points[2].v * (float)ph);
 					/* Segment 2: Pitch -> Stumps is a STRAIGHT LINE (no curve)! */
 					LineTo(hdc, px2, py2);
 				}
 
-				/* 2. Glossy highlight streak on top */
-				HPEN hPenGloss = CreatePen(PS_SOLID, 3, cset->gdi_highlight);
+				/* 2. Glossy highlight streak on top (2px) */
+				HPEN hPenGloss = CreatePen(PS_SOLID, 2, cset->gdi_highlight);
 				SelectObject(hdc, hPenGloss);
 				DeleteObject(hPenBase);
 
-				MoveToEx(hdc, px0, py0 - 2, NULL);
-				for (int i = 1; i <= 30; i++) {
-					struct pt2d p = eval_bezier2(start, c1, end1, (float)i / 30.0f);
-					LineTo(hdc, (int)p.x, (int)p.y - 2);
+				MoveToEx(hdc, px0, py0 - 1, NULL);
+				for (int i = 1; i <= 60; i++) {
+					struct pt2d p = eval_bezier2(start, c1, end1, (float)i / 60.0f);
+					LineTo(hdc, (int)p.x, (int)p.y - 1);
 				}
 
 				if (bt->point_count >= 3) {
-					int px2 = cx + (int)(bt->points[2].u * PREVIEW_WIDTH);
-					int py2 = cy + (int)(bt->points[2].v * PREVIEW_HEIGHT);
-					LineTo(hdc, px2, py2 - 2);
+					int px2 = cx + (int)(bt->points[2].u * (float)pw);
+					int py2 = cy + (int)(bt->points[2].v * (float)ph);
+					LineTo(hdc, px2, py2 - 1);
 				}
 
 				SelectObject(hdc, hOldPen);
@@ -816,15 +980,16 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 			SetTextColor(hdc, RGB(255, 255, 255));
 
 			for (int i = 0; i < bt->point_count; i++) {
-				int bx = cx + (int)(bt->points[i].u * PREVIEW_WIDTH);
-				int by = cy + (int)(bt->points[i].v * PREVIEW_HEIGHT);
+				int bx = cx + (int)(bt->points[i].u * (float)pw);
+				int by = cy + (int)(bt->points[i].v * (float)ph);
+
 				HBRUSH hbr = CreateSolidBrush(bcols[i]);
 				HBRUSH hOldBr = (HBRUSH)SelectObject(hdc, hbr);
 				HPEN hpw = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
 				HPEN hOldP = (HPEN)SelectObject(hdc, hpw);
 
-				Ellipse(hdc, bx - 7, by - 7, bx + 7, by + 7);
-				TextOutA(hdc, bx + 10, by - 8, labels[i], (int)strlen(labels[i]));
+				Ellipse(hdc, bx - 6, by - 6, bx + 6, by + 6);
+				TextOutA(hdc, bx + 8, by - 8, labels[i], (int)strlen(labels[i]));
 
 				SelectObject(hdc, hOldP);
 				DeleteObject(hpw);
@@ -841,12 +1006,14 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 		if (!bt) return 0;
 		int mx = LOWORD(lParam);
 		int my = HIWORD(lParam);
-		int cx = 15;
-		int cy = 42;
+		int cx = bt->preview_x;
+		int cy = bt->preview_y;
+		int pw = bt->preview_w;
+		int ph = bt->preview_h;
 
-		if (mx >= cx && mx <= cx + PREVIEW_WIDTH && my >= cy && my <= cy + PREVIEW_HEIGHT) {
-			float u = (float)(mx - cx) / (float)PREVIEW_WIDTH;
-			float v = (float)(my - cy) / (float)PREVIEW_HEIGHT;
+		if (pw > 0 && ph > 0 && mx >= cx && mx <= cx + pw && my >= cy && my <= cy + ph) {
+			float u = (float)(mx - cx) / (float)pw;
+			float v = (float)(my - cy) / (float)ph;
 			if (u < 0.0f) u = 0.0f;
 			if (u > 1.0f) u = 1.0f;
 			if (v < 0.0f) v = 0.0f;
@@ -914,8 +1081,6 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 			break;
 		case ID_BTN_RESET:
 			ball_tracker_reset_points(bt);
-			InvalidateRect(hwnd, NULL, FALSE);
-			trigger_paused_rerender(bt);
 			break;
 		case ID_BTN_ANIMATE:
 			if (bt->point_count == 3) {
@@ -978,12 +1143,17 @@ static DWORD WINAPI BallTrackerThread(LPVOID param)
 	wc.hbrBackground = NULL;
 	RegisterClassA(&wc);
 
+	int init_w = s_bt_saved_w >= 640 ? s_bt_saved_w : 840;
+	int init_h = s_bt_saved_h >= 480 ? s_bt_saved_h : 620;
+	int init_x = s_bt_has_saved_pos ? s_bt_saved_x : CW_USEDEFAULT;
+	int init_y = s_bt_has_saved_pos ? s_bt_saved_y : CW_USEDEFAULT;
+
 	HWND hwnd = CreateWindowExA(
 		WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
 		"OBSReplayBallTrackerPopup",
 		"Cricket Ball Tracker (3-Point)",
-		WS_POPUP | WS_CAPTION | WS_SYSMENU,
-		CW_USEDEFAULT, CW_USEDEFAULT, 588, 480,
+		WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
+		init_x, init_y, init_w, init_h,
 		NULL, NULL, GetModuleHandle(NULL), bt);
 
 	if (!hwnd) {
@@ -1012,6 +1182,30 @@ struct ball_tracker *ball_tracker_create(struct replay_source *context)
 	bt->thickness = 5;
 	bt->enabled = false;
 	bt->point_count = 0;
+
+	if (context && context->source) {
+		obs_data_t *settings = obs_source_get_settings(context->source);
+		if (settings) {
+			int sx = (int)obs_data_get_int(settings, "ball_tracker_win_x");
+			int sy = (int)obs_data_get_int(settings, "ball_tracker_win_y");
+			int sw = (int)obs_data_get_int(settings, "ball_tracker_win_w");
+			int sh = (int)obs_data_get_int(settings, "ball_tracker_win_h");
+			if (sw >= 640 && sh >= 480) {
+				bt->saved_x = sx;
+				bt->saved_y = sy;
+				bt->saved_w = sw;
+				bt->saved_h = sh;
+				bt->has_saved_pos = true;
+
+				s_bt_saved_x = sx;
+				s_bt_saved_y = sy;
+				s_bt_saved_w = sw;
+				s_bt_saved_h = sh;
+				s_bt_has_saved_pos = true;
+			}
+			obs_data_release(settings);
+		}
+	}
 
 	bt->thread = CreateThread(NULL, 0, BallTrackerThread, bt, 0, &bt->thread_id);
 	return bt;
@@ -1048,9 +1242,19 @@ void ball_tracker_show(struct ball_tracker *bt)
 	for (int i = 0; !bt->hwnd && i < 20; i++)
 		os_sleep_ms(10);
 	if (bt->hwnd) {
-		ShowWindow(bt->hwnd, SW_SHOW);
-		SetWindowPos(bt->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-		             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		if (bt->has_saved_pos || s_bt_has_saved_pos) {
+			int sx = bt->has_saved_pos ? bt->saved_x : s_bt_saved_x;
+			int sy = bt->has_saved_pos ? bt->saved_y : s_bt_saved_y;
+			int sw = bt->has_saved_pos ? bt->saved_w : s_bt_saved_w;
+			int sh = bt->has_saved_pos ? bt->saved_h : s_bt_saved_h;
+			if (sw < 640) sw = 840;
+			if (sh < 480) sh = 620;
+			SetWindowPos(bt->hwnd, HWND_TOPMOST, sx, sy, sw, sh,
+			             SWP_SHOWWINDOW);
+		} else {
+			SetWindowPos(bt->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+			             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		}
 		bt->is_showing = true;
 		update_status_text(bt);
 		InvalidateRect(bt->hwnd, NULL, FALSE);
@@ -1081,6 +1285,7 @@ void ball_tracker_reset_points(struct ball_tracker *bt)
 	update_status_text(bt);
 	if (bt->hwnd && bt->is_showing)
 		InvalidateRect(bt->hwnd, NULL, FALSE);
+	trigger_paused_rerender(bt);
 }
 
 void ball_tracker_toggle_visibility(struct ball_tracker *bt)
