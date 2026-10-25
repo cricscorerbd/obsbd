@@ -411,7 +411,7 @@ static void replay_update_position(struct replay_source *context, bool lock)
 		obs_data_set_double(settings, SETTING_SPEED, 60.0);
 		obs_data_release(settings);
 	}
-	replay_reset_zoom(context);
+	context->zoom_percent = 100.0f;
 	ball_tracker_reset_points(context->ball_tracker);
 	replay_update_text(context);
 	context->start_timestamp = obs_get_video_frame_time();

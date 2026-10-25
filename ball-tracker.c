@@ -551,7 +551,10 @@ static void trigger_paused_rerender(struct ball_tracker *bt)
 		return;
 	struct replay_source *c = bt->context;
 	if (!c->play && c->current_replay.video_frame_count) {
-		pthread_mutex_lock(&c->video_mutex);
+		if (pthread_mutex_trylock(&c->video_mutex) != 0) {
+			c->stepped = true;
+			return;
+		}
 		uint64_t pos = c->video_frame_position;
 		if (pos >= c->current_replay.video_frame_count)
 			pos = c->current_replay.video_frame_count - 1;
@@ -1081,6 +1084,7 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 			break;
 		case ID_BTN_RESET:
 			ball_tracker_reset_points(bt);
+			trigger_paused_rerender(bt);
 			break;
 		case ID_BTN_ANIMATE:
 			if (bt->point_count == 3) {
@@ -1088,6 +1092,7 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 				ball_tracker_start_animation(bt);
 				update_status_text(bt);
 				InvalidateRect(hwnd, NULL, FALSE);
+				trigger_paused_rerender(bt);
 			}
 			break;
 		case ID_BTN_TOGGLE:
@@ -1285,7 +1290,6 @@ void ball_tracker_reset_points(struct ball_tracker *bt)
 	update_status_text(bt);
 	if (bt->hwnd && bt->is_showing)
 		InvalidateRect(bt->hwnd, NULL, FALSE);
-	trigger_paused_rerender(bt);
 }
 
 void ball_tracker_toggle_visibility(struct ball_tracker *bt)
@@ -1302,7 +1306,6 @@ void ball_tracker_toggle_visibility(struct ball_tracker *bt)
 	update_status_text(bt);
 	if (bt->hwnd && bt->is_showing)
 		InvalidateRect(bt->hwnd, NULL, FALSE);
-	trigger_paused_rerender(bt);
 }
 
 void ball_tracker_cycle_color(struct ball_tracker *bt)
@@ -1340,7 +1343,6 @@ void ball_tracker_start_animation(struct ball_tracker *bt)
 	pthread_mutex_lock(&bt->mutex);
 	ball_tracker_start_animation_locked(bt);
 	pthread_mutex_unlock(&bt->mutex);
-	trigger_paused_rerender(bt);
 }
 
 #else /* !_WIN32 */
