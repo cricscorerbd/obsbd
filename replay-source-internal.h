@@ -151,6 +151,7 @@ struct replay_source {
 	audio_t       *audio_t;
 	video_scaler_t *scaler;
 	bool  lossless;
+	bool  auto_save;
 	char *file_format;
 	char *directory;
 	uint64_t       start_save_timestamp;

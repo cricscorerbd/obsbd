@@ -532,6 +532,7 @@ static void replay_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, SETTING_SPEED_POPUP_ALWAYS_SHOW, false);
 	obs_data_set_default_string(settings, SETTING_FILE_FORMAT, "%CCYY-%MM-%DD %hh.%mm.%ss");
 	obs_data_set_default_bool(settings, SETTING_LOSSLESS, false);
+	obs_data_set_default_bool(settings, SETTING_AUTO_SAVE, true);
 }
 
 static void replay_source_show(void *data)
@@ -725,14 +726,35 @@ static void InitFileOutputLossless(struct replay_source *context)
 static void InitFileOutput(struct replay_source *context)
 {
 	context->fileOutput = obs_output_create("ffmpeg_muxer", "replay_ffmpeg_output", NULL, NULL);
-	context->h264Recording = obs_video_encoder_create("obs_x264", "replay_h264_recording", NULL, NULL);
+
+	/* Try hardware encoders first (NVENC / QuickSync) for 0% CPU impact, fallback to x264 */
+	context->h264Recording = obs_video_encoder_create("jim_nvenc", "replay_h264_recording", NULL, NULL);
+	if (!context->h264Recording)
+		context->h264Recording = obs_video_encoder_create("obs_qsv11", "replay_h264_recording", NULL, NULL);
+	if (!context->h264Recording)
+		context->h264Recording = obs_video_encoder_create("obs_x264", "replay_h264_recording", NULL, NULL);
+
 	obs_data_t *xsettings = obs_data_create();
-	obs_data_set_int(xsettings, "crf", 23);
-	obs_data_set_bool(xsettings, "use_bufsize", true);
-	obs_data_set_string(xsettings, "rate_control", "CRF");
-	obs_data_set_string(xsettings, "profile", "high");
-	obs_data_set_string(xsettings, "preset", "veryfast");
-	obs_encoder_update(context->h264Recording, xsettings);
+	if (context->h264Recording) {
+		const char *enc_id = obs_encoder_get_id(context->h264Recording);
+		if (enc_id && strcmp(enc_id, "jim_nvenc") == 0) {
+			obs_data_set_string(xsettings, "rate_control", "CBR");
+			obs_data_set_int(xsettings, "bitrate", 8000);
+			obs_data_set_string(xsettings, "preset", "p1");
+			obs_data_set_string(xsettings, "profile", "high");
+		} else if (enc_id && strcmp(enc_id, "obs_qsv11") == 0) {
+			obs_data_set_string(xsettings, "rate_control", "CBR");
+			obs_data_set_int(xsettings, "bitrate", 8000);
+			obs_data_set_string(xsettings, "target_usage", "speed");
+		} else {
+			obs_data_set_int(xsettings, "crf", 22);
+			obs_data_set_bool(xsettings, "use_bufsize", true);
+			obs_data_set_string(xsettings, "rate_control", "CRF");
+			obs_data_set_string(xsettings, "profile", "high");
+			obs_data_set_string(xsettings, "preset", "veryfast");
+		}
+		obs_encoder_update(context->h264Recording, xsettings);
+	}
 	obs_data_release(xsettings);
 	obs_encoder_set_video(context->h264Recording, context->video_output);
 	obs_output_set_video_encoder(context->fileOutput, context->h264Recording);
@@ -945,9 +967,19 @@ void replay_save(struct replay_source *context)
 		}
 	}
 
-	char *filename = os_generate_formatted_filename(context->lossless ? "avi" : "flv", true, context->file_format);
+	char *filename = os_generate_formatted_filename(context->lossless ? "avi" : "mp4", true, context->file_format);
 	struct dstr path = {NULL, 0, 0};
-	dstr_copy(&path, context->directory);
+	if (context->directory && *context->directory) {
+		dstr_copy(&path, context->directory);
+	} else {
+		char *rec_path = obs_frontend_get_current_record_output_path();
+		if (rec_path && *rec_path) {
+			dstr_copy(&path, rec_path);
+			bfree(rec_path);
+		} else {
+			dstr_copy(&path, "./");
+		}
+	}
 	dstr_replace(&path, "\\", "/");
 	if (dstr_end(&path) != '/')
 		dstr_cat_ch(&path, '/');
@@ -957,6 +989,7 @@ void replay_save(struct replay_source *context)
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "path", path.array);
 	obs_data_set_string(settings, "url", path.array);
+	obs_data_set_string(settings, "movflags", "faststart");
 
 	obs_output_update(context->fileOutput, settings);
 	dstr_free(&path);
@@ -1142,6 +1175,11 @@ static void replay_retrieve(struct replay_source *context)
 
 	if (context->replays.size == sizeof new_replay) {
 		replay_update_position(context, true);
+	}
+	if (context->auto_save) {
+		if (context->saving_status == SAVING_STATUS_NONE) {
+			context->saving_status = SAVING_STATUS_STARTING;
+		}
 	}
 	replay_purge_replays(context);
 	if (context->load_switch_scene_name) {
@@ -2436,6 +2474,7 @@ static void replay_source_update(void *data, obs_data_t *settings)
 	}
 
 	context->lossless = obs_data_get_bool(settings, SETTING_LOSSLESS);
+	context->auto_save = obs_data_get_bool(settings, SETTING_AUTO_SAVE);
 	const char *directory = obs_data_get_string(settings, SETTING_DIRECTORY);
 	if (context->directory) {
 		if (strcmp(context->directory, directory) != 0) {
@@ -3364,6 +3403,7 @@ static obs_properties_t *replay_source_properties(void *data)
 	obs_properties_add_path(props, SETTING_DIRECTORY, obs_module_text("Directory"), OBS_PATH_DIRECTORY, NULL, NULL);
 	obs_properties_add_text(props, SETTING_FILE_FORMAT, obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
 	obs_properties_add_bool(props, SETTING_LOSSLESS, obs_module_text("Lossless"));
+	obs_properties_add_bool(props, SETTING_AUTO_SAVE, obs_module_text("AutoSaveReplays"));
 
 	prop = obs_properties_add_list(props, SETTING_PROGRESS_SOURCE, obs_module_text("ProgressCropSource"),
 				       OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
