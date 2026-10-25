@@ -21,6 +21,7 @@
 #define ID_BTN_TOGGLE      3011
 #define ID_BTN_COLOR       3012
 #define ID_BTN_CLOSE       3013
+#define ID_BTN_ANIMATE     3014
 
 #define PREVIEW_WIDTH  550
 #define PREVIEW_HEIGHT 310
@@ -36,6 +37,11 @@ struct ball_tracker {
 	enum ball_tracker_color color;
 	int thickness;               /* 4 to 12 */
 
+	/* Trajectory Animation */
+	bool is_animating;
+	uint64_t anim_start_ns;
+	uint64_t anim_duration_ns;
+
 	/* Output frame overlay buffer */
 	struct obs_source_frame *overlay_frame;
 
@@ -48,6 +54,7 @@ struct ball_tracker {
 	HWND hwnd_btn_next1;
 	HWND hwnd_btn_next5;
 	HWND hwnd_btn_reset;
+	HWND hwnd_btn_animate;
 	HWND hwnd_btn_toggle;
 	HWND hwnd_btn_color;
 	HWND hwnd_btn_close;
@@ -253,6 +260,19 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	struct pt2d p2 = {bt->points[2].u * (float)frame->width, bt->points[2].v * (float)frame->height};
 	const struct tracker_color_set *cset = &s_color_sets[bt->color % BALL_TRACKER_COLOR_COUNT];
 
+	float progress = 1.0f;
+	if (bt->is_animating) {
+		uint64_t now_ns = os_gettime_ns();
+		if (now_ns >= bt->anim_start_ns + bt->anim_duration_ns) {
+			bt->is_animating = false;
+			progress = 1.0f;
+		} else {
+			progress = (float)(now_ns - bt->anim_start_ns) / (float)bt->anim_duration_ns;
+			if (progress < 0.0f) progress = 0.0f;
+			if (progress > 1.0f) progress = 1.0f;
+		}
+	}
+
 	pthread_mutex_unlock(&bt->mutex);
 
 	/* Determine target frame: if frame is already zoomed_frame, write directly.
@@ -348,52 +368,93 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 		pts2[i].ny = ny2;
 	}
 
+	/* Ballistic trajectory proportion between Segment 1 (Release -> Pitch) and Segment 2 (Pitch -> Stumps) */
+	float total_d = d1 + d2;
+	float t_split = 0.60f;
+	if (total_d > 1.0f) {
+		t_split = d1 / total_d;
+		if (t_split < 0.35f) t_split = 0.35f;
+		if (t_split > 0.80f) t_split = 0.80f;
+	}
+
+	int active_steps1 = 0;
+	int active_steps2 = -1;
+	struct pt2d head_pos = p0;
+
+	if (progress <= t_split) {
+		float u1 = progress / t_split;
+		active_steps1 = (int)(u1 * (float)steps1);
+		if (active_steps1 < 0) active_steps1 = 0;
+		if (active_steps1 > steps1) active_steps1 = steps1;
+		head_pos.x = pts1[active_steps1].x;
+		head_pos.y = pts1[active_steps1].y;
+		active_steps2 = -1;
+	} else {
+		active_steps1 = steps1;
+		float u2 = (progress - t_split) / (1.0f - t_split);
+		if (u2 < 0.0f) u2 = 0.0f;
+		if (u2 > 1.0f) u2 = 1.0f;
+		active_steps2 = (int)(u2 * (float)steps2);
+		if (active_steps2 < 0) active_steps2 = 0;
+		if (active_steps2 > steps2) active_steps2 = steps2;
+		head_pos.x = pts2[active_steps2].x;
+		head_pos.y = pts2[active_steps2].y;
+	}
+
 	/* --- 4-Pass 3D Glossy Capsule Ribbon Shading --- */
 
 	/* Pass 1: Soft Ambient Outer Glow Aura */
 	int radius_glow = radius_core + 5;
-	for (int i = 0; i <= steps1; i++)
+	for (int i = 0; i <= active_steps1; i++)
 		draw_filled_circle(target, (int)pts1[i].x, (int)pts1[i].y, radius_glow, &cset->base, 55);
-	for (int i = 0; i <= steps2; i++)
-		draw_filled_circle(target, (int)pts2[i].x, (int)pts2[i].y, radius_glow, &cset->base, 55);
+	if (active_steps2 >= 0) {
+		for (int i = 0; i <= active_steps2; i++)
+			draw_filled_circle(target, (int)pts2[i].x, (int)pts2[i].y, radius_glow, &cset->base, 55);
+	}
 
 	/* Pass 2: Solid Vibrant Capsule Core Body (Smooth rounded cylinder/capsule ends) */
-	for (int i = 0; i <= steps1; i++)
+	for (int i = 0; i <= active_steps1; i++)
 		draw_filled_circle(target, (int)pts1[i].x, (int)pts1[i].y, radius_core, &cset->base, 255);
-	for (int i = 0; i <= steps2; i++)
-		draw_filled_circle(target, (int)pts2[i].x, (int)pts2[i].y, radius_core, &cset->base, 255);
+	if (active_steps2 >= 0) {
+		for (int i = 0; i <= active_steps2; i++)
+			draw_filled_circle(target, (int)pts2[i].x, (int)pts2[i].y, radius_core, &cset->base, 255);
+	}
 
 	/* Pass 3: Soft Glossy Cylindrical Sheen (Pastel gradient highlight on upper ridge) */
 	int r_sheen = (int)((float)radius_core * 0.58f);
 	if (r_sheen < 2) r_sheen = 2;
 	float off_sheen = (float)radius_core * 0.28f;
-	for (int i = 0; i <= steps1; i++) {
+	for (int i = 0; i <= active_steps1; i++) {
 		int sx = (int)(pts1[i].x + pts1[i].nx * off_sheen);
 		int sy = (int)(pts1[i].y + pts1[i].ny * off_sheen);
 		draw_filled_circle(target, sx, sy, r_sheen, &cset->highlight, 160);
 	}
-	for (int i = 0; i <= steps2; i++) {
-		int sx = (int)(pts2[i].x + pts2[i].nx * off_sheen);
-		int sy = (int)(pts2[i].y + pts2[i].ny * off_sheen);
-		draw_filled_circle(target, sx, sy, r_sheen, &cset->highlight, 160);
+	if (active_steps2 >= 0) {
+		for (int i = 0; i <= active_steps2; i++) {
+			int sx = (int)(pts2[i].x + pts2[i].nx * off_sheen);
+			int sy = (int)(pts2[i].y + pts2[i].ny * off_sheen);
+			draw_filled_circle(target, sx, sy, r_sheen, &cset->highlight, 160);
+		}
 	}
 
 	/* Pass 4: Sharp Specular White Reflection Streak (Glossy shine like reference photo) */
 	int r_spec = (int)((float)radius_core * 0.28f);
 	if (r_spec < 2) r_spec = 2;
 	float off_spec = (float)radius_core * 0.42f;
-	for (int i = 0; i <= steps1; i++) {
+	for (int i = 0; i <= active_steps1; i++) {
 		int hx = (int)(pts1[i].x + pts1[i].nx * off_spec);
 		int hy = (int)(pts1[i].y + pts1[i].ny * off_spec);
 		draw_filled_circle(target, hx, hy, r_spec, &s_white, 220);
 	}
-	for (int i = 0; i <= steps2; i++) {
-		int hx = (int)(pts2[i].x + pts2[i].nx * off_spec);
-		int hy = (int)(pts2[i].y + pts2[i].ny * off_spec);
-		draw_filled_circle(target, hx, hy, r_spec, &s_white, 220);
+	if (active_steps2 >= 0) {
+		for (int i = 0; i <= active_steps2; i++) {
+			int hx = (int)(pts2[i].x + pts2[i].nx * off_spec);
+			int hy = (int)(pts2[i].y + pts2[i].ny * off_spec);
+			draw_filled_circle(target, hx, hy, r_spec, &s_white, 220);
+		}
 	}
 
-	/* Point 1: 3D Glossy Release Ball Sphere */
+	/* Point 1: 3D Glossy Release Ball Sphere (Bowler's release point) */
 	int ball_r = (int)((float)radius_core * 1.7f);
 	if (ball_r < 6) ball_r = 6;
 	draw_filled_circle(target, (int)p0.x, (int)p0.y, ball_r + 4, &cset->base, 100);
@@ -401,17 +462,23 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 	draw_filled_circle(target, (int)p0.x - ball_r / 3, (int)p0.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
 	draw_filled_circle(target, (int)p0.x - ball_r / 3, (int)p0.y - ball_r / 3, ball_r / 3, &s_white, 230);
 
-	/* Point 2: Turf Impact Bounce Ring & Flash Spot */
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r + 6, &cset->base, 70);
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r + 2, &cset->highlight, 150);
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r, &cset->base, 255);
-	draw_filled_circle(target, (int)p1.x, (int)p1.y, ball_r / 2, &s_white, 240);
+	/* NO DOT AT PITCH POINT (p1) - as requested by user */
 
-	/* Point 3: 3D Glossy Stumps Impact / Target Ball */
-	draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r + 4, &cset->base, 100);
-	draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r, &cset->base, 255);
-	draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
-	draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r / 3, &s_white, 230);
+	/* Moving Ball during animation / Stumps Impact Ball when complete */
+	if (progress < 0.98f) {
+		if (progress > 0.02f) {
+			draw_filled_circle(target, (int)head_pos.x, (int)head_pos.y, ball_r + 4, &cset->base, 100);
+			draw_filled_circle(target, (int)head_pos.x, (int)head_pos.y, ball_r, &cset->base, 255);
+			draw_filled_circle(target, (int)head_pos.x - ball_r / 3, (int)head_pos.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
+			draw_filled_circle(target, (int)head_pos.x - ball_r / 3, (int)head_pos.y - ball_r / 3, ball_r / 3, &s_white, 230);
+		}
+	} else {
+		/* Point 3: 3D Glossy Stumps Impact / Target Ball */
+		draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r + 4, &cset->base, 100);
+		draw_filled_circle(target, (int)p2.x, (int)p2.y, ball_r, &cset->base, 255);
+		draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r * 2 / 3, &cset->highlight, 170);
+		draw_filled_circle(target, (int)p2.x - ball_r / 3, (int)p2.y - ball_r / 3, ball_r / 3, &s_white, 230);
+	}
 
 	return target;
 }
@@ -419,6 +486,15 @@ struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs
 /* ------------------------------------------------------------------ */
 /*  Win32 UI Implementation                                           */
 /* ------------------------------------------------------------------ */
+static inline void ball_tracker_start_animation_locked(struct ball_tracker *bt)
+{
+	if (bt->point_count == 3) {
+		bt->is_animating = true;
+		bt->anim_start_ns = os_gettime_ns();
+		bt->anim_duration_ns = 1200ULL * 1000000ULL;
+	}
+}
+
 static void update_status_text(struct ball_tracker *bt)
 {
 	if (!bt || !bt->hwnd_status)
@@ -593,24 +669,28 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 
 		/* Control buttons Row 2: Tracker controls */
 		int btn_y2 = 398;
-		int bw2 = 125;
-		bt->hwnd_btn_reset = CreateWindowExW(0, L"BUTTON", L"\u21bb Reset Points",
+		int bw2 = 98;
+		int bgap2 = 15;
+		bt->hwnd_btn_reset = CreateWindowExW(0, L"BUTTON", L"\u21bb Reset",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
 			15, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_RESET, NULL, NULL);
+		bt->hwnd_btn_animate = CreateWindowExW(0, L"BUTTON", L"\u25b6 Animate",
+			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+			15 + (bw2 + bgap2), btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_ANIMATE, NULL, NULL);
 		bt->hwnd_btn_toggle = CreateWindowExW(0, L"BUTTON", L"Line: ON",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + bw2 + 10, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_TOGGLE, NULL, NULL);
+			15 + (bw2 + bgap2) * 2, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_TOGGLE, NULL, NULL);
 		bt->hwnd_btn_color = CreateWindowExW(0, L"BUTTON", L"Color: Red",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (bw2 + 10) * 2, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_COLOR, NULL, NULL);
+			15 + (bw2 + bgap2) * 3, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_COLOR, NULL, NULL);
 		bt->hwnd_btn_close = CreateWindowExW(0, L"BUTTON", L"\u2715 Close",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			15 + (bw2 + 10) * 3, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_CLOSE, NULL, NULL);
+			15 + (bw2 + bgap2) * 4, btn_y2, bw2, btn_h, hwnd, (HMENU)ID_BTN_CLOSE, NULL, NULL);
 
 		HWND all_btns[] = {bt->hwnd_btn_prev5, bt->hwnd_btn_prev1, bt->hwnd_btn_play_pause,
 		                   bt->hwnd_btn_next1, bt->hwnd_btn_next5, bt->hwnd_btn_reset,
-		                   bt->hwnd_btn_toggle, bt->hwnd_btn_color, bt->hwnd_btn_close};
-		for (int i = 0; i < 9; i++) {
+		                   bt->hwnd_btn_animate, bt->hwnd_btn_toggle, bt->hwnd_btn_color, bt->hwnd_btn_close};
+		for (int i = 0; i < 10; i++) {
 			SendMessageA(all_btns[i], WM_SETFONT, (WPARAM)bt->hfont_btns, TRUE);
 		}
 
@@ -780,6 +860,7 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 				bt->point_count++;
 				if (bt->point_count == 3) {
 					bt->enabled = true;
+					ball_tracker_start_animation_locked(bt);
 				}
 			} else {
 				/* Cycle or fine tune: replace closest point */
@@ -796,6 +877,7 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 				}
 				bt->points[closest].u = u;
 				bt->points[closest].v = v;
+				ball_tracker_start_animation_locked(bt);
 			}
 			pthread_mutex_unlock(&bt->mutex);
 
@@ -834,6 +916,14 @@ static LRESULT CALLBACK BallTrackerWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
 			ball_tracker_reset_points(bt);
 			InvalidateRect(hwnd, NULL, FALSE);
 			trigger_paused_rerender(bt);
+			break;
+		case ID_BTN_ANIMATE:
+			if (bt->point_count == 3) {
+				bt->enabled = true;
+				ball_tracker_start_animation(bt);
+				update_status_text(bt);
+				InvalidateRect(hwnd, NULL, FALSE);
+			}
 			break;
 		case ID_BTN_TOGGLE:
 			ball_tracker_toggle_visibility(bt);
@@ -985,6 +1075,7 @@ void ball_tracker_reset_points(struct ball_tracker *bt)
 	}
 	bt->point_count = 0;
 	bt->enabled = false;
+	bt->is_animating = false;
 	pthread_mutex_unlock(&bt->mutex);
 
 	update_status_text(bt);
@@ -998,11 +1089,15 @@ void ball_tracker_toggle_visibility(struct ball_tracker *bt)
 	pthread_mutex_lock(&bt->mutex);
 	if (bt->point_count == 3) {
 		bt->enabled = !bt->enabled;
+		if (bt->enabled) {
+			ball_tracker_start_animation_locked(bt);
+		}
 	}
 	pthread_mutex_unlock(&bt->mutex);
 	update_status_text(bt);
 	if (bt->hwnd && bt->is_showing)
 		InvalidateRect(bt->hwnd, NULL, FALSE);
+	trigger_paused_rerender(bt);
 }
 
 void ball_tracker_cycle_color(struct ball_tracker *bt)
@@ -1022,6 +1117,27 @@ void ball_tracker_notify_frame(struct ball_tracker *bt)
 		InvalidateRect(bt->hwnd, NULL, FALSE);
 }
 
+bool ball_tracker_is_enabled(struct ball_tracker *bt)
+{
+	if (!bt) return false;
+	return bt->enabled && bt->point_count == 3;
+}
+
+bool ball_tracker_is_animating(struct ball_tracker *bt)
+{
+	if (!bt) return false;
+	return bt->enabled && bt->point_count == 3 && bt->is_animating;
+}
+
+void ball_tracker_start_animation(struct ball_tracker *bt)
+{
+	if (!bt) return;
+	pthread_mutex_lock(&bt->mutex);
+	ball_tracker_start_animation_locked(bt);
+	pthread_mutex_unlock(&bt->mutex);
+	trigger_paused_rerender(bt);
+}
+
 #else /* !_WIN32 */
 
 struct ball_tracker *ball_tracker_create(struct replay_source *context) { (void)context; return NULL; }
@@ -1032,6 +1148,9 @@ void ball_tracker_reset_points(struct ball_tracker *bt) { (void)bt; }
 void ball_tracker_toggle_visibility(struct ball_tracker *bt) { (void)bt; }
 void ball_tracker_cycle_color(struct ball_tracker *bt) { (void)bt; }
 void ball_tracker_notify_frame(struct ball_tracker *bt) { (void)bt; }
+bool ball_tracker_is_enabled(struct ball_tracker *bt) { (void)bt; return false; }
+bool ball_tracker_is_animating(struct ball_tracker *bt) { (void)bt; return false; }
+void ball_tracker_start_animation(struct ball_tracker *bt) { (void)bt; }
 struct obs_source_frame *ball_tracker_render(struct ball_tracker *bt, struct obs_source_frame *frame) { (void)bt; return frame; }
 
 #endif /* _WIN32 */

@@ -33,6 +33,9 @@ void ball_tracker_reset_points(struct ball_tracker *bt);
 void ball_tracker_toggle_visibility(struct ball_tracker *bt);
 void ball_tracker_cycle_color(struct ball_tracker *bt);
 void ball_tracker_notify_frame(struct ball_tracker *bt);
+bool ball_tracker_is_enabled(struct ball_tracker *bt);
+bool ball_tracker_is_animating(struct ball_tracker *bt);
+void ball_tracker_start_animation(struct ball_tracker *bt);
 
 /* Renders ball trajectory overlay onto frame if active and enabled.
  * If inactive/disabled, returns frame immediately with ZERO overhead.

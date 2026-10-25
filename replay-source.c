@@ -1490,6 +1490,9 @@ static struct obs_source_frame *replay_restart_at_begin(struct replay_source *c,
 	c->start_timestamp = os_timestamp;
 	c->pause_timestamp = c->play ? 0 : os_timestamp;
 	c->audio_frame_position = 0;
+	if (c->ball_tracker && ball_tracker_is_enabled(c->ball_tracker)) {
+		ball_tracker_start_animation(c->ball_tracker);
+	}
 	duration = (int64_t)(((int64_t)c->current_replay.last_frame_timestamp - (int64_t)c->current_replay.first_frame_timestamp) *
 			    100.0 / c->speed_percent);
 	if (c->backward) {
@@ -2923,20 +2926,25 @@ static void replay_source_tick(void *data, float seconds)
 		if (context->end && (context->end_action == END_ACTION_HIDE || context->end_action == END_ACTION_HIDE_ALL)) {
 			obs_source_output_video(context->source, NULL);
 		}
-		if (context->stepped) {
-			struct obs_source_frame *frame;
-			uint64_t t;
-
+		bool was_stepped = context->stepped;
+		bool bt_anim = ball_tracker_is_animating(context->ball_tracker);
+		if ((was_stepped || bt_anim) && context->current_replay.video_frame_count) {
 			context->stepped = false;
-			frame = context->current_replay.video_frames[context->video_frame_position];
-			t = frame->timestamp;
-			frame->timestamp = os_timestamp;
-			struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
-			out = ball_tracker_render(context->ball_tracker, out);
-			obs_source_output_video(context->source, out);
-			frame->timestamp = t;
-			replay_update_text(context);
-			ball_tracker_notify_frame(context->ball_tracker);
+			uint64_t pos = context->video_frame_position;
+			if (pos >= context->current_replay.video_frame_count)
+				pos = context->current_replay.video_frame_count - 1;
+			struct obs_source_frame *frame = context->current_replay.video_frames[pos];
+			if (frame) {
+				uint64_t t = frame->timestamp;
+				frame->timestamp = os_timestamp;
+				struct obs_source_frame *out = replay_get_zoomed_frame(context, frame);
+				out = ball_tracker_render(context->ball_tracker, out);
+				obs_source_output_video(context->source, out);
+				frame->timestamp = t;
+				replay_update_text(context);
+				if (was_stepped)
+					ball_tracker_notify_frame(context->ball_tracker);
+			}
 		}
 		pthread_mutex_unlock(&context->video_mutex);
 		return;
