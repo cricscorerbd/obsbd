@@ -49,6 +49,18 @@ struct replay {
 	int64_t  trim_end;
 };
 
+struct replay_save_job {
+	struct obs_source_frame **video_frames;
+	uint64_t frame_count;
+	uint32_t width;
+	uint32_t height;
+	enum video_format format;
+	uint32_t fps_num;
+	uint32_t fps_den;
+	char *file_path;
+	struct replay_save_job *next;
+};
+
 /* ------------------------------------------------------------------ */
 /*  replay_source – the main plugin context struct                    */
 /* ------------------------------------------------------------------ */
@@ -151,6 +163,7 @@ struct replay_source {
 	audio_t       *audio_t;
 	video_scaler_t *scaler;
 	bool  lossless;
+	bool  auto_save;
 	char *file_format;
 	char *directory;
 	uint64_t       start_save_timestamp;
@@ -163,6 +176,15 @@ struct replay_source {
 	bool free_after_save;
 	void *speed_popup;
 	struct ball_tracker *ball_tracker;
+
+	/* Dedicated Replay Auto-Save worker thread */
+	pthread_t save_thread;
+	pthread_mutex_t save_mutex;
+	os_event_t *save_event;
+	struct replay_save_job *save_queue_head;
+	struct replay_save_job *save_queue_tail;
+	bool save_thread_active;
+	bool save_thread_stop;
 
 	float zoom_percent;
 	video_scaler_t *zoom_scaler;
