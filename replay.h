@@ -105,7 +105,6 @@ void replay_filter_check(void *data);
 #define SETTING_DIRECTORY "directory"
 #define SETTING_FILE_FORMAT "file_format"
 #define SETTING_LOSSLESS "lossless"
-#define SETTING_AUTO_SAVE "auto_save"
 #define SETTING_PROGRESS_SOURCE "progress_source"
 #define SETTING_TEXT_SOURCE "text_source"
 #define SETTING_TEXT "text"

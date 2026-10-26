@@ -60,7 +60,6 @@
 #define ID_BTN_ZOOM_200      2086
 #define ID_BTN_ZOOM_300      2087
 #define ID_BTN_BALL_TRACKER  2095
-#define ID_BTN_SAVE_REPLAY   2096
 
 /* ------------------------------------------------------------------ */
 /*  Position persistence across show/hide and re-triggers             */
@@ -99,7 +98,6 @@ struct speed_popup {
 	HWND   hwnd_zoom_200;
 	HWND   hwnd_zoom_300;
 	HWND   hwnd_ball_tracker;
-	HWND   hwnd_save_mp4;
 	HFONT  hfont_title;
 	HFONT  hfont_btns;
 	HBRUSH hbr_bg;
@@ -232,13 +230,7 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 
 		if (p->hwnd_ball_tracker) {
 			int tracker_y = zbtn_y + btn_h + 8;
-			int gap_s = 6;
-			int total_w = cw - pad * 2;
-			int bw_bt = (total_w - gap_s) * 62 / 100;
-			int bw_sv = total_w - gap_s - bw_bt;
-			MoveWindow(p->hwnd_ball_tracker, pad, tracker_y, bw_bt, btn_h, TRUE);
-			if (p->hwnd_save_mp4)
-				MoveWindow(p->hwnd_save_mp4, pad + bw_bt + gap_s, tracker_y, bw_sv, btn_h, TRUE);
+			MoveWindow(p->hwnd_ball_tracker, pad, tracker_y, cw - pad * 2, btn_h, TRUE);
 		}
 	}
 
@@ -361,15 +353,10 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			SendMessageA(*zb[i].h, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 		}
 
-		p->hwnd_ball_tracker = CreateWindowExW(0, L"BUTTON", L"\u25cf  Cricket Ball Tracker",
+		p->hwnd_ball_tracker = CreateWindowExW(0, L"BUTTON", L"\u25cf  Cricket Ball Tracker (3-Point)",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
 			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_BALL_TRACKER, NULL, NULL);
 		SendMessageA(p->hwnd_ball_tracker, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
-
-		p->hwnd_save_mp4 = CreateWindowExW(0, L"BUTTON", L"\U0001F4BE Save MP4",
-			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_SAVE_REPLAY, NULL, NULL);
-		SendMessageA(p->hwnd_save_mp4, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 
 		popup_refresh_label(p);
 		popup_refresh_dir_buttons(p);
@@ -472,10 +459,6 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		case ID_BTN_BALL_TRACKER:
 			if (p->context && p->context->ball_tracker)
 				ball_tracker_show(p->context->ball_tracker);
-			break;
-		case ID_BTN_SAVE_REPLAY:
-			if (p->context && p->context->saving_status == SAVING_STATUS_NONE)
-				p->context->saving_status = SAVING_STATUS_STARTING;
 			break;
 		}
 		if (chg) {
