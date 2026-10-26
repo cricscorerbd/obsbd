@@ -25,10 +25,12 @@ target_sources(${PROJECT_NAME} PRIVATE
 	replay-filter-async.c
 	speed-popup.c
 	ball-tracker.c
+	replay-save.c
 	replay.h
 	replay-source-internal.h
 	speed-popup.h
 	ball-tracker.h
+	replay-save.h
 	version.h)
 
 if(BUILD_OUT_OF_TREE)
@@ -66,7 +68,8 @@ target_link_libraries(${PROJECT_NAME}
 	OBS::libobs)
 
 if(OS_WINDOWS)
-	target_link_libraries(${PROJECT_NAME} user32 gdi32 comctl32)
+	# Media Foundation (MP4 replay saving)
+	target_link_libraries(${PROJECT_NAME} user32 gdi32 comctl32 ole32 mfplat mfreadwrite mfuuid)
 endif()
 
 if(MSVC)

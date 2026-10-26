@@ -11,6 +11,7 @@
 #include "replay-source-internal.h"
 #include "speed-popup.h"
 #include "ball-tracker.h"
+#include "replay-save.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
@@ -711,183 +712,19 @@ void replay_toggle_play_pause(struct replay_source *context)
 	replay_pause_hotkey(context, 0, NULL, true);
 }
 
-static bool save_audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
-                                      uint64_t *out_ts, uint32_t mixers,
-                                      struct audio_output_data *mixes)
-{
-	UNUSED_PARAMETER(param);
-	UNUSED_PARAMETER(mixers);
-	UNUSED_PARAMETER(end_ts_in);
-	*out_ts = start_ts_in;
-	for (size_t ch = 0; ch < 2; ch++) {
-		if (mixes[0].data[ch])
-			memset(mixes[0].data[ch], 0, sizeof(float) * AUDIO_OUTPUT_FRAMES);
-	}
-	return true;
-}
-
 static void replay_encode_job_to_mp4(struct replay_source *context, struct replay_save_job *job)
 {
-	if (!job || job->frame_count == 0 || !job->video_frames || !job->video_frames[0])
+	if (!job || job->frame_count == 0 || !job->video_frames)
 		return;
 
-	blog(LOG_INFO, "[replay_source: '%s'] Auto-saving %llu frames to '%s'",
-	     obs_source_get_name(context->source), (unsigned long long)job->frame_count, job->file_path);
+	const char *name = obs_source_get_name(context->source);
+	blog(LOG_INFO, "[replay_source: '%s'] Auto-saving %llu frames and %llu audio packets to '%s'", name,
+	     (unsigned long long)job->frame_count, (unsigned long long)job->audio_frame_count, job->file_path);
 
-	struct video_output_info vi = {0};
-	vi.format = VIDEO_FORMAT_NV12;
-	vi.width = job->width;
-	vi.height = job->height;
-	vi.fps_num = job->fps_num;
-	vi.fps_den = job->fps_den;
-	vi.cache_size = 16;
-	vi.colorspace = VIDEO_CS_DEFAULT;
-	vi.range = VIDEO_RANGE_DEFAULT;
-	vi.name = "ReplaySaveOutput";
-
-	video_t *vo = NULL;
-	int r = video_output_open(&vo, &vi);
-	if (r != VIDEO_OUTPUT_SUCCESS) {
-		blog(LOG_WARNING, "[replay_source: '%s'] Failed to open video_output for save (%d)",
-		     obs_source_get_name(context->source), r);
-		return;
-	}
-
-	struct audio_output_info aoi = {0};
-	aoi.name = "ReplaySaveAudio";
-	aoi.samples_per_sec = 48000;
-	aoi.format = AUDIO_FORMAT_FLOAT_PLANAR;
-	aoi.speakers = SPEAKERS_STEREO;
-	aoi.input_param = NULL;
-	aoi.input_callback = save_audio_input_callback;
-
-	audio_t *at = NULL;
-	int ar = audio_output_open(&at, &aoi);
-	if (ar != AUDIO_OUTPUT_SUCCESS) {
-		blog(LOG_WARNING, "[replay_source: '%s'] Failed to open audio_output for save (%d)",
-		     obs_source_get_name(context->source), ar);
-		video_output_close(vo);
-		return;
-	}
-
-	obs_encoder_t *enc = obs_video_encoder_create("obs_x264", "replay_h264_saver", NULL, NULL);
-	if (!enc) {
-		audio_output_close(at);
-		video_output_close(vo);
-		return;
-	}
-
-	obs_data_t *xsettings = obs_data_create();
-	obs_data_set_string(xsettings, "rate_control", "CRF");
-	obs_data_set_int(xsettings, "crf", 22);
-	obs_data_set_string(xsettings, "preset", "ultrafast");
-	obs_data_set_string(xsettings, "tune", "zerolatency");
-	obs_data_set_string(xsettings, "profile", "high");
-	obs_encoder_update(enc, xsettings);
-	obs_data_release(xsettings);
-
-	obs_encoder_set_video(enc, vo);
-
-	obs_encoder_t *aenc = obs_audio_encoder_create("ffmpeg_aac", "replay_aac_saver", NULL, 0, NULL);
-	if (!aenc) {
-		obs_encoder_release(enc);
-		audio_output_close(at);
-		video_output_close(vo);
-		return;
-	}
-	obs_encoder_set_audio(aenc, at);
-
-	obs_output_t *out = obs_output_create("ffmpeg_muxer", "replay_mux_saver", NULL, NULL);
-	if (!out) {
-		obs_encoder_release(aenc);
-		obs_encoder_release(enc);
-		audio_output_close(at);
-		video_output_close(vo);
-		return;
-	}
-
-	obs_data_t *out_settings = obs_data_create();
-	obs_data_set_string(out_settings, "path", job->file_path);
-	obs_data_set_string(out_settings, "movflags", "faststart");
-	obs_output_update(out, out_settings);
-	obs_data_release(out_settings);
-
-	obs_output_set_video_encoder(out, enc);
-	obs_output_set_audio_encoder(out, aenc, 0);
-
-	if (!obs_output_start(out)) {
-		const char *err = obs_output_get_last_error(out);
-		blog(LOG_WARNING, "[replay_source: '%s'] Failed to start MP4 output: %s",
-		     obs_source_get_name(context->source), err ? err : "unknown error");
-		obs_output_release(out);
-		obs_encoder_release(aenc);
-		obs_encoder_release(enc);
-		audio_output_close(at);
-		video_output_close(vo);
-		return;
-	}
-
-	struct video_scale_info ssi = {0};
-	ssi.format = job->format;
-	ssi.width = job->width;
-	ssi.height = job->height;
-	struct video_scale_info dsi = {0};
-	dsi.format = vi.format;
-	dsi.width = vi.width;
-	dsi.height = vi.height;
-
-	video_scaler_t *scaler = NULL;
-	video_scaler_create(&scaler, &dsi, &ssi, VIDEO_SCALE_DEFAULT);
-
-	uint64_t frame_interval_ns = 1000000000ULL * job->fps_den / job->fps_num;
-	if (frame_interval_ns == 0) frame_interval_ns = 16666666ULL;
-	uint32_t frame_interval_ms = (uint32_t)(frame_interval_ns / 1000000ULL);
-	if (frame_interval_ms == 0) frame_interval_ms = 16;
-
-	uint64_t start_time = os_gettime_ns();
-
-	for (uint64_t i = 0; i < job->frame_count; i++) {
-		struct obs_source_frame *src_frame = job->video_frames[i];
-		if (!src_frame)
-			continue;
-
-		uint64_t timestamp = start_time + i * frame_interval_ns;
-		struct video_frame out_frame;
-		if (video_output_lock_frame(vo, &out_frame, 1, timestamp)) {
-			if (scaler) {
-				video_scaler_scale(scaler, out_frame.data, out_frame.linesize,
-				                   (const uint8_t *const *)src_frame->data, src_frame->linesize);
-			} else {
-				for (size_t p = 0; p < MAX_AV_PLANES; p++) {
-					if (!src_frame->data[p] || !out_frame.data[p]) break;
-					memcpy(out_frame.data[p], src_frame->data[p], src_frame->linesize[p]);
-				}
-			}
-			video_output_unlock_frame(vo);
-		}
-
-		os_sleep_ms(frame_interval_ms);
-	}
-
-	if (scaler)
-		video_scaler_destroy(scaler);
-
-	obs_output_stop(out);
-
-	/* Wait max 4 seconds for ffmpeg_muxer to finish writing moov atom */
-	uint64_t wait_start = os_gettime_ns();
-	while (obs_output_active(out) && (os_gettime_ns() - wait_start < 4000000000ULL)) {
-		os_sleep_ms(25);
-	}
-
-	obs_output_release(out);
-	obs_encoder_release(aenc);
-	obs_encoder_release(enc);
-	audio_output_close(at);
-	video_output_close(vo);
-
-	blog(LOG_INFO, "[replay_source: '%s'] Replay saved successfully to '%s'",
-	     obs_source_get_name(context->source), job->file_path);
+	if (replay_save_encode_mp4(job, name))
+		blog(LOG_INFO, "[replay_source: '%s'] Replay saved successfully to '%s'", name, job->file_path);
+	else
+		blog(LOG_WARNING, "[replay_source: '%s'] Failed to save replay to '%s'", name, job->file_path);
 }
 
 static void *replay_save_worker(void *data)
@@ -928,6 +765,10 @@ static void *replay_save_worker(void *data)
 			}
 		}
 		bfree(job->video_frames);
+		bfree(job->video_timestamps);
+		for (uint64_t i = 0; i < job->audio_frame_count; i++)
+			free_audio_packet(&job->audio_frames[i]);
+		bfree(job->audio_frames);
 		bfree(job->file_path);
 		bfree(job);
 	}
@@ -943,11 +784,33 @@ static void replay_queue_save_job(struct replay_source *context, struct replay *
 	struct replay_save_job *job = bzalloc(sizeof(struct replay_save_job));
 	job->frame_count = replay->video_frame_count;
 	job->video_frames = bzalloc(sizeof(struct obs_source_frame *) * job->frame_count);
+	job->video_timestamps = bzalloc(sizeof(uint64_t) * job->frame_count);
 
 	for (uint64_t i = 0; i < job->frame_count; i++) {
 		job->video_frames[i] = replay->video_frames[i];
-		if (job->video_frames[i])
+		if (job->video_frames[i]) {
 			os_atomic_inc_long(&job->video_frames[i]->refs);
+			job->video_timestamps[i] = job->video_frames[i]->timestamp;
+		}
+	}
+
+	/* Copy the audio: the replay may be purged while the job is still saving. */
+	if (replay->audio_frames && replay->audio_frame_count && replay->oai.format == AUDIO_FORMAT_FLOAT_PLANAR) {
+		const size_t channels = get_audio_channels(replay->oai.speakers);
+		job->oai = replay->oai;
+		job->audio_frame_count = replay->audio_frame_count;
+		job->audio_frames = bzalloc(sizeof(struct obs_audio_data) * job->audio_frame_count);
+		for (uint64_t i = 0; i < job->audio_frame_count; i++) {
+			const struct obs_audio_data *src = &replay->audio_frames[i];
+			struct obs_audio_data *dst = &job->audio_frames[i];
+			dst->frames = src->frames;
+			dst->timestamp = src->timestamp;
+			for (size_t ch = 0; ch < channels && ch < MAX_AV_PLANES; ch++) {
+				if (!src->data[ch])
+					break;
+				dst->data[ch] = bmemdup(src->data[ch], src->frames * sizeof(float));
+			}
+		}
 	}
 
 	job->width = replay->video_frames[0]->width;
@@ -958,6 +821,7 @@ static void replay_queue_save_job(struct replay_source *context, struct replay *
 	const struct video_output_info *ovi = v ? video_output_get_info(v) : NULL;
 	job->fps_num = ovi ? ovi->fps_num : 60;
 	job->fps_den = ovi ? ovi->fps_den : 1;
+	job->colorspace = ovi ? ovi->colorspace : VIDEO_CS_DEFAULT;
 
 	struct dstr dir = {0};
 	if (context->directory && *context->directory) {

@@ -51,10 +51,18 @@ struct replay {
 
 struct replay_save_job {
 	struct obs_source_frame **video_frames;
+	/* Timestamps captured at queue time; the tick thread temporarily
+	 * rewrites frame->timestamp while rendering paused frames. */
+	uint64_t *video_timestamps;
 	uint64_t frame_count;
+	/* Private copy of the replay audio (owned by the job). */
+	struct obs_audio_data *audio_frames;
+	uint64_t audio_frame_count;
+	struct audio_convert_info oai;
 	uint32_t width;
 	uint32_t height;
 	enum video_format format;
+	enum video_colorspace colorspace;
 	uint32_t fps_num;
 	uint32_t fps_den;
 	char *file_path;
