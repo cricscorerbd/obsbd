@@ -711,6 +711,21 @@ void replay_toggle_play_pause(struct replay_source *context)
 	replay_pause_hotkey(context, 0, NULL, true);
 }
 
+static bool save_audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
+                                      uint64_t *out_ts, uint32_t mixers,
+                                      struct audio_output_data *mixes)
+{
+	UNUSED_PARAMETER(param);
+	UNUSED_PARAMETER(mixers);
+	UNUSED_PARAMETER(end_ts_in);
+	*out_ts = start_ts_in;
+	for (size_t ch = 0; ch < 2; ch++) {
+		if (mixes[0].data[ch])
+			memset(mixes[0].data[ch], 0, sizeof(float) * AUDIO_OUTPUT_FRAMES);
+	}
+	return true;
+}
+
 static void replay_encode_job_to_mp4(struct replay_source *context, struct replay_save_job *job)
 {
 	if (!job || job->frame_count == 0 || !job->video_frames || !job->video_frames[0])
@@ -738,8 +753,26 @@ static void replay_encode_job_to_mp4(struct replay_source *context, struct repla
 		return;
 	}
 
+	struct audio_output_info aoi = {0};
+	aoi.name = "ReplaySaveAudio";
+	aoi.samples_per_sec = 48000;
+	aoi.format = AUDIO_FORMAT_FLOAT_PLANAR;
+	aoi.speakers = SPEAKERS_STEREO;
+	aoi.input_param = NULL;
+	aoi.input_callback = save_audio_input_callback;
+
+	audio_t *at = NULL;
+	int ar = audio_output_open(&at, &aoi);
+	if (ar != AUDIO_OUTPUT_SUCCESS) {
+		blog(LOG_WARNING, "[replay_source: '%s'] Failed to open audio_output for save (%d)",
+		     obs_source_get_name(context->source), ar);
+		video_output_close(vo);
+		return;
+	}
+
 	obs_encoder_t *enc = obs_video_encoder_create("obs_x264", "replay_h264_saver", NULL, NULL);
 	if (!enc) {
+		audio_output_close(at);
 		video_output_close(vo);
 		return;
 	}
@@ -755,9 +788,20 @@ static void replay_encode_job_to_mp4(struct replay_source *context, struct repla
 
 	obs_encoder_set_video(enc, vo);
 
+	obs_encoder_t *aenc = obs_audio_encoder_create("ffmpeg_aac", "replay_aac_saver", NULL, 0, NULL);
+	if (!aenc) {
+		obs_encoder_release(enc);
+		audio_output_close(at);
+		video_output_close(vo);
+		return;
+	}
+	obs_encoder_set_audio(aenc, at);
+
 	obs_output_t *out = obs_output_create("ffmpeg_muxer", "replay_mux_saver", NULL, NULL);
 	if (!out) {
+		obs_encoder_release(aenc);
 		obs_encoder_release(enc);
+		audio_output_close(at);
 		video_output_close(vo);
 		return;
 	}
@@ -769,13 +813,16 @@ static void replay_encode_job_to_mp4(struct replay_source *context, struct repla
 	obs_data_release(out_settings);
 
 	obs_output_set_video_encoder(out, enc);
+	obs_output_set_audio_encoder(out, aenc, 0);
 
 	if (!obs_output_start(out)) {
 		const char *err = obs_output_get_last_error(out);
 		blog(LOG_WARNING, "[replay_source: '%s'] Failed to start MP4 output: %s",
 		     obs_source_get_name(context->source), err ? err : "unknown error");
 		obs_output_release(out);
+		obs_encoder_release(aenc);
 		obs_encoder_release(enc);
+		audio_output_close(at);
 		video_output_close(vo);
 		return;
 	}
@@ -794,13 +841,17 @@ static void replay_encode_job_to_mp4(struct replay_source *context, struct repla
 
 	uint64_t frame_interval_ns = 1000000000ULL * job->fps_den / job->fps_num;
 	if (frame_interval_ns == 0) frame_interval_ns = 16666666ULL;
+	uint32_t frame_interval_ms = (uint32_t)(frame_interval_ns / 1000000ULL);
+	if (frame_interval_ms == 0) frame_interval_ms = 16;
+
+	uint64_t start_time = os_gettime_ns();
 
 	for (uint64_t i = 0; i < job->frame_count; i++) {
 		struct obs_source_frame *src_frame = job->video_frames[i];
 		if (!src_frame)
 			continue;
 
-		uint64_t timestamp = i * frame_interval_ns;
+		uint64_t timestamp = start_time + i * frame_interval_ns;
 		struct video_frame out_frame;
 		if (video_output_lock_frame(vo, &out_frame, 1, timestamp)) {
 			if (scaler) {
@@ -814,6 +865,8 @@ static void replay_encode_job_to_mp4(struct replay_source *context, struct repla
 			}
 			video_output_unlock_frame(vo);
 		}
+
+		os_sleep_ms(frame_interval_ms);
 	}
 
 	if (scaler)
@@ -828,7 +881,9 @@ static void replay_encode_job_to_mp4(struct replay_source *context, struct repla
 	}
 
 	obs_output_release(out);
+	obs_encoder_release(aenc);
 	obs_encoder_release(enc);
+	audio_output_close(at);
 	video_output_close(vo);
 
 	blog(LOG_INFO, "[replay_source: '%s'] Replay saved successfully to '%s'",
