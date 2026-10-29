@@ -48,8 +48,7 @@
 #define ID_BTN_40       2040
 #define ID_BTN_50       2050
 #define ID_BTN_60       2060
-#define ID_BTN_BACKWARD 2070
-#define ID_BTN_FORWARD  2071
+#define ID_BTN_DIRECTION 2070
 #define ID_BTN_PLAY_PAUSE 2072
 #define ID_SLIDER_ZOOM       2080
 #define ID_BTN_ZOOM_MINUS    2081
@@ -67,7 +66,7 @@
 static int  s_saved_x       = -1;
 static int  s_saved_y       = -1;
 static int  s_saved_w       = 450;
-static int  s_saved_h       = 430;
+static int  s_saved_h       = 390;
 static bool s_has_saved_pos = false;
 
 /* ------------------------------------------------------------------ */
@@ -85,8 +84,7 @@ struct speed_popup {
 	HWND   hwnd_b40;
 	HWND   hwnd_b50;
 	HWND   hwnd_b60;
-	HWND   hwnd_backward;
-	HWND   hwnd_forward;
+	HWND   hwnd_direction;
 	HWND   hwnd_play_pause;
 	HWND   hwnd_zoom_label;
 	HWND   hwnd_slider_zoom;
@@ -127,11 +125,12 @@ static void popup_refresh_label(struct speed_popup *p)
 	SetWindowTextA(p->hwnd_label, buf);
 }
 
-static void popup_refresh_dir_buttons(struct speed_popup *p)
+static void popup_refresh_dir_button(struct speed_popup *p)
 {
+	if (!p || !p->hwnd_direction || !p->context)
+		return;
 	bool bwd = p->context->backward;
-	EnableWindow(p->hwnd_backward, bwd ? FALSE : TRUE);
-	EnableWindow(p->hwnd_forward,  bwd ? TRUE  : FALSE);
+	SetWindowTextW(p->hwnd_direction, bwd ? L"\u25C4  Backward" : L"\u25BA  Forward");
 }
 
 static void popup_refresh_play_pause_button(struct speed_popup *p)
@@ -182,7 +181,6 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 
 	int spdbtn_y  = slider_y + slider_h + btn_gap;
 	int dirbtn_y  = spdbtn_y + btn_h + btn_gap;
-	int playbtn_y = dirbtn_y + btn_h + btn_gap;
 
 	MoveWindow(p->hwnd_label,  pad,     label_y,  cw - pad * 2,       label_h,  TRUE);
 	MoveWindow(p->hwnd_slider, pad - 2, slider_y, cw - (pad - 2) * 2, slider_h, TRUE);
@@ -199,18 +197,14 @@ static void popup_layout(struct speed_popup *p, HWND hwnd)
 	}
 
 	int dh = (area - 6) / 2;
-	MoveWindow(p->hwnd_backward, pad,          dirbtn_y, dh, btn_h, TRUE);
-	MoveWindow(p->hwnd_forward,  pad + dh + 6, dirbtn_y, dh, btn_h, TRUE);
-
+	MoveWindow(p->hwnd_direction,  pad,          dirbtn_y, dh, btn_h, TRUE);
 	if (p->hwnd_play_pause) {
-		int play_w = dh;
-		int play_x = pad + (area - play_w) / 2;
-		MoveWindow(p->hwnd_play_pause, play_x, playbtn_y, play_w, btn_h, TRUE);
+		MoveWindow(p->hwnd_play_pause, pad + dh + 6, dirbtn_y, dh, btn_h, TRUE);
 	}
 
 	/* Zoom section */
 	if (p->hwnd_zoom_label && p->hwnd_slider_zoom) {
-		int zlabel_y  = playbtn_y + btn_h + 10;
+		int zlabel_y  = dirbtn_y + btn_h + 10;
 		int zlabel_h  = 22;
 		int zslider_y = zlabel_y + zlabel_h + 2;
 		int zslider_h = 28;
@@ -304,17 +298,13 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			SendMessageA(*sb[i].h, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 		}
 
-		/* Direction buttons */
-		p->hwnd_backward = CreateWindowExA(0, "BUTTON", "\u25c4  Backward",
+		/* Direction toggle button (Forward by default, toggles to Backward on click) */
+		p->hwnd_direction = CreateWindowExW(0, L"BUTTON", L"",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_BACKWARD, NULL, NULL);
-		p->hwnd_forward = CreateWindowExA(0, "BUTTON", "Forward  \u25ba",
-			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_FORWARD, NULL, NULL);
-		SendMessageA(p->hwnd_backward, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
-		SendMessageA(p->hwnd_forward,  WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
+			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_DIRECTION, NULL, NULL);
+		SendMessageA(p->hwnd_direction, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 
-		/* Play / Pause toggle button (centered below Backward / Forward) */
+		/* Play / Pause toggle button */
 		p->hwnd_play_pause = CreateWindowExW(0, L"BUTTON", L"",
 			WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
 			0, 0, 10, 10, hwnd, (HMENU)ID_BTN_PLAY_PAUSE, NULL, NULL);
@@ -359,7 +349,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		SendMessageA(p->hwnd_ball_tracker, WM_SETFONT, (WPARAM)p->hfont_btns, TRUE);
 
 		popup_refresh_label(p);
-		popup_refresh_dir_buttons(p);
+		popup_refresh_dir_button(p);
 		popup_refresh_play_pause_button(p);
 		popup_refresh_zoom_label(p);
 		return 0;
@@ -435,15 +425,14 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 		case ID_BTN_40:      spd = 40.f;  chg = true; break;
 		case ID_BTN_50:      spd = 50.f;  chg = true; break;
 		case ID_BTN_60:      spd = 60.f;  chg = true; break;
-		case ID_BTN_BACKWARD:
-			replay_set_backward(p->context);
+		case ID_BTN_DIRECTION:
+			if (p->context->backward)
+				replay_set_forward(p->context);
+			else
+				replay_set_backward(p->context);
 			popup_refresh_label(p);
-			popup_refresh_dir_buttons(p);
-			break;
-		case ID_BTN_FORWARD:
-			replay_set_forward(p->context);
-			popup_refresh_label(p);
-			popup_refresh_dir_buttons(p);
+			popup_refresh_dir_button(p);
+			popup_refresh_play_pause_button(p);
 			break;
 		case ID_BTN_PLAY_PAUSE:
 			replay_toggle_play_pause(p->context);
@@ -508,7 +497,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 	case WM_GETMINMAXINFO: {
 		MINMAXINFO *mmi = (MINMAXINFO *)lParam;
 		mmi->ptMinTrackSize.x = 360;
-		mmi->ptMinTrackSize.y = 390;
+		mmi->ptMinTrackSize.y = 350;
 		return 0;
 	}
 
@@ -530,7 +519,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 				}
 			} else {
 				sw = 450;
-				sh = 430;
+				sh = 390;
 				RECT rcWork;
 				SystemParametersInfoA(SPI_GETWORKAREA, 0, &rcWork, 0);
 				sx = rcWork.right  - sw - 24;
@@ -571,7 +560,7 @@ static LRESULT CALLBACK SpeedPopupWndProc(HWND hwnd, UINT msg,
 			if (pos > (int)SETTING_SPEED_MAX) pos = (int)SETTING_SPEED_MAX;
 			SendMessageA(p->hwnd_slider, TBM_SETPOS, TRUE, pos);
 			popup_refresh_label(p);
-			popup_refresh_dir_buttons(p);
+			popup_refresh_dir_button(p);
 			popup_refresh_play_pause_button(p);
 		}
 		if (p && p->hwnd_slider_zoom && p->hwnd_zoom_label) {
@@ -623,7 +612,7 @@ static DWORD WINAPI SpeedPopupThread(LPVOID param)
 		"OBSReplaySpeedMeterPopup",
 		"Replay Speed Meter",
 		WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 450, 430,
+		CW_USEDEFAULT, CW_USEDEFAULT, 450, 390,
 		NULL, NULL, GetModuleHandle(NULL), p);
 
 	if (!hwnd) {
